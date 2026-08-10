@@ -44,6 +44,7 @@ export class LoopController {
   private timer: NodeJS.Timeout | undefined;
   private ticking = false;
   private readonly validatedRepos = new Set<string>();
+  private readonly runLocks = new Map<string, Promise<void>>();
 
   constructor(
     readonly config: ControllerConfig,
@@ -119,28 +120,34 @@ export class LoopController {
   }
 
   async cancel(runId: string): Promise<LoopRun> {
-    const run = await this.store.readRun(runId);
-    if (isTerminalPhase(run.phase)) return run;
-    run.cancel_requested = true;
-    return await this.transition(run, "cancelled", "none", "cancelled by operator", "Run cancelled. Sessions and GitHub resources were preserved.");
+    return await this.withRunLock(runId, async () => {
+      const run = await this.store.readRun(runId);
+      if (isTerminalPhase(run.phase)) return run;
+      run.cancel_requested = true;
+      return await this.transition(run, "cancelled", "none", "cancelled by operator", "Run cancelled. Sessions and GitHub resources were preserved.");
+    });
   }
 
   async resume(runId: string): Promise<LoopRun> {
-    const run = await this.store.readRun(runId);
-    if (!["blocked", "blocked_auth", "blocked_github_auth"].includes(run.phase)) return run;
-    run.last_error = undefined;
-    run.terminal_reason = undefined;
-    run.paused_for_manual_message = undefined;
-    run.next_retry_at = undefined;
-    run.recovery_attempt = 0;
-    const phase = run.resume_phase ?? this.inferResumePhase(run);
-    return await this.transition(run, phase, this.actorFor(phase), "manual reconciliation", "Operator resumed the existing Run; no new Topic was created.");
+    return await this.withRunLock(runId, async () => {
+      const run = await this.store.readRun(runId);
+      if (!["blocked", "blocked_auth", "blocked_github_auth"].includes(run.phase)) return run;
+      run.last_error = undefined;
+      run.terminal_reason = undefined;
+      run.paused_for_manual_message = undefined;
+      run.next_retry_at = undefined;
+      run.recovery_attempt = 0;
+      const phase = run.resume_phase ?? this.inferResumePhase(run);
+      return await this.transition(run, phase, this.actorFor(phase), "manual reconciliation", "Operator resumed the existing Run; no new Topic was created.");
+    });
   }
 
   async reconcile(runId: string): Promise<LoopRun> {
-    const run = await this.store.readRun(runId);
-    if (isTerminalPhase(run.phase) && !["blocked", "blocked_auth", "blocked_github_auth"].includes(run.phase)) return run;
-    return await this.process(run, true);
+    return await this.withRunLock(runId, async () => {
+      const run = await this.store.readRun(runId);
+      if (isTerminalPhase(run.phase) && !["blocked", "blocked_auth", "blocked_github_auth"].includes(run.phase)) return run;
+      return await this.process(run, true);
+    });
   }
 
   async tick(): Promise<void> {
@@ -151,7 +158,9 @@ export class LoopController {
       const active = runs.filter((run) => run.phase !== "queued").slice(0, this.config.maxActiveRuns);
       const available = Math.max(0, this.config.maxActiveRuns - active.length);
       const selected = [...active, ...runs.filter((run) => run.phase === "queued").slice(0, available)];
-      for (const run of selected) await this.process(run, false);
+      for (const run of selected) {
+        await this.withRunLock(run.run_id, async () => await this.process(await this.store.readRun(run.run_id), false));
+      }
     } finally {
       this.ticking = false;
     }
@@ -159,7 +168,7 @@ export class LoopController {
 
   private async process(run: LoopRun, forced: boolean): Promise<LoopRun> {
     try {
-      if (run.cancel_requested) return await this.cancel(run.run_id);
+      if (run.cancel_requested) return await this.transition(run, "cancelled", "none", "cancelled by operator", "Run cancelled. Sessions and GitHub resources were preserved.");
       if (!forced && run.next_retry_at && Date.parse(run.next_retry_at) > Date.now()) return run;
       if (!this.validatedRepos.has(run.repo)) {
         await this.github.validate(run.repo);
@@ -491,6 +500,18 @@ export class LoopController {
 
   private rememberResumePhase(run: LoopRun): void {
     if (run.phase !== "recovering") run.resume_phase = run.phase as Exclude<RunPhase, "recovering">;
+  }
+
+  private async withRunLock<T>(runId: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.runLocks.get(runId) ?? Promise.resolve();
+    const task = previous.catch(() => undefined).then(action);
+    const barrier = task.then(() => undefined, () => undefined);
+    this.runLocks.set(runId, barrier);
+    try {
+      return await task;
+    } finally {
+      if (this.runLocks.get(runId) === barrier) this.runLocks.delete(runId);
+    }
   }
 
   private async progress(run: LoopRun, type: string, message: string, data?: Record<string, unknown>): Promise<void> {

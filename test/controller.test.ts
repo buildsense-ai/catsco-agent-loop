@@ -197,3 +197,13 @@ test("strict execute_attempt worker refusal blocks immediately instead of retryi
   assert.match(run.terminal_reason!, /strict execute_attempt worker/);
   assert.equal(run.recovery_attempt, 0);
 });
+
+test("manual reconcile and scheduler serialize per Run", async () => {
+  const ctx = await setup();
+  const run = await ctx.controller.createRun({ request: "work", repo: "acme/widget" });
+  await Promise.all([ctx.controller.reconcile(run.run_id), ctx.controller.tick(), ctx.controller.reconcile(run.run_id)]);
+  const persisted = await ctx.store.readRun(run.run_id);
+  assert.equal(persisted.phase, "monday_finding");
+  assert.equal(ctx.catsco.topics.size, 1);
+  assert.equal(ctx.catsco.topics.get(persisted.monday.topic_id!)!.messages.filter((message) => message.from_uid === 363).length, 1);
+});
