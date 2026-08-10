@@ -1,0 +1,31 @@
+{
+  "name": "@buildsense-ai/catsco-agent-loop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "loopctl": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/server.ts",
+    "start": "node dist/server.js",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "artifact:serve": "node scripts/serve-artifact.mjs"
+  },
+  "dependencies": {
+    "yauzl": "^3.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/yauzl": "^2.10.3",
+    "@types/yazl": "^3.3.1",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.3",
+    "yazl": "^3.3.1"
+  }
+}

@@ -1,0 +1,23 @@
+[Unit]
+Description=CatsCompany two-agent loop controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=catsloop
+Group=catsloop
+WorkingDirectory=/opt/catsco-agent-loop/app
+EnvironmentFile=/etc/catsco-agent-loop.env
+ExecStart=/usr/bin/node /opt/catsco-agent-loop/app/dist/server.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/catsco-agent-loop
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

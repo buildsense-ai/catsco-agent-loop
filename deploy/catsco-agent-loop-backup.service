@@ -1,0 +1,7 @@
+[Unit]
+Description=Backup CatsCompany agent loop state
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/env bash -c 'set -euo pipefail; install -d -m 0700 /var/backups/catsco-agent-loop; stamp=$(date -u +%%Y%%m%%dT%%H%%M%%SZ); tar -C /var/lib -czf /var/backups/catsco-agent-loop/runs-${stamp}.tar.gz catsco-agent-loop; find /var/backups/catsco-agent-loop -type f -name "runs-*.tar.gz" -mtime +7 -delete'

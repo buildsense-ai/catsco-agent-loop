@@ -1,0 +1,18 @@
+{
+  "catscoBaseUrl": "https://app.catsco.cc",
+  "controllerUid": 363,
+  "mondayAgentUid": 553,
+  "developerAgentUid": 559,
+  "mondayGithubLogin": "monday-reviewer-login",
+  "developerGithubLogin": "developer-login",
+  "stateDir": "/var/lib/catsco-agent-loop/runs",
+  "host": "127.0.0.1",
+  "port": 19992,
+  "allowedOrigin": "https://agent-365.artifacts.catsco.fun:19991",
+  "maxActiveRuns": 1,
+  "catscoPollMs": 5000,
+  "githubPollMs": 15000,
+  "idlePollMs": 30000,
+  "noChecksGraceMs": 30000,
+  "stageTimeoutMs": 2700000
+}

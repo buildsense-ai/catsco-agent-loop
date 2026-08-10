@@ -1,0 +1,63 @@
+import type { LoopRun } from "./types.js";
+
+function capsule(run: LoopRun, role: "Monday" | "Developer", missing: string): string {
+  return [
+    "[Loop Controller Resume Capsule]",
+    `Run: ${run.run_id}`,
+    `Role: ${role}`,
+    `Phase: ${run.phase}`,
+    `Iteration: ${run.iteration}`,
+    `Repository: ${run.repo}`,
+    `Branch: ${run.branch}`,
+    run.pr ? `PR: ${run.pr.url}` : "PR: not created yet",
+    run.pr ? `Current Head SHA: ${run.pr.head_sha}` : "Current Head SHA: unavailable",
+    `Current missing mechanical delivery: ${missing}`,
+    "Controller state is authoritative; continue this same task in this same conversation.",
+  ].join("\n");
+}
+
+export function mondayFindingPrompt(run: LoopRun): string {
+  return [
+    capsule(run, "Monday", "a validated Finding ZIP"),
+    "",
+    "Implementation request:",
+    run.request,
+    "",
+    "Investigate the repository and produce the normal Monday Finding ZIP. This turn is investigation and delivery only; do not implement code.",
+    "The ZIP must contain FINDING.md and manifest.json. Attach the ZIP to this conversation.",
+  ].join("\n");
+}
+
+export function developerPrompt(run: LoopRun, kind: "initial" | "revision" | "ci", detail?: string): string {
+  const missing = kind === "initial" ? "an open pull request" : kind === "revision" ? "a new Head SHA on the existing PR" : "a new Head SHA fixing CI";
+  return [
+    capsule(run, "Developer", missing),
+    "",
+    kind === "initial" ? `Implementation request:\n${run.request}` : `Continue the existing implementation for iteration ${run.iteration}.`,
+    detail ? `\nAdditional evidence:\n${detail}` : "",
+    "",
+    `Use branch ${run.branch} and target ${run.base_branch}. Implement, test, commit, push, and create or update the same PR in ${run.repo}.`,
+    "Do not merge or close the PR. A text-only completion message is not delivery; Controller verifies the GitHub PR, Head SHA, and CI.",
+  ].filter(Boolean).join("\n");
+}
+
+export function mondayReviewPrompt(run: LoopRun): string {
+  const checks = run.ci?.checks.length
+    ? run.ci.checks.map((check) => `- ${check.name}: ${check.conclusion ?? check.state}${check.url ? ` (${check.url})` : ""}`).join("\n")
+    : "- Repository has no observed checks after the configured grace period.";
+  return [
+    capsule(run, "Monday", "APPROVED on the current SHA, or both a GitHub review/comment and a new Finding ZIP"),
+    "",
+    `Review PR: ${run.pr?.url}`,
+    `Exact Head SHA: ${run.pr?.head_sha}`,
+    `CI state: ${run.ci?.state}`,
+    checks,
+    "",
+    "Review the exact current Head SHA. If changes are needed, leave a GitHub review/comment with the Monday GitHub identity and attach a new Finding ZIP here.",
+    "If requirements are satisfied, submit an APPROVED GitHub review against the current Head SHA. Do not merge.",
+  ].join("\n");
+}
+
+export function supplementPrompt(run: LoopRun, role: "Monday" | "Developer", missing: string): string {
+  return [capsule(run, role, missing), "", `The prior Episode ended, but Controller still cannot verify: ${missing}.`, "Do not redo completed work. Reconcile existing side effects and provide only the missing mechanical delivery."].join("\n");
+}
