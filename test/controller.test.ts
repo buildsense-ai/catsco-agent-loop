@@ -152,9 +152,8 @@ test("Developer terminal Episode without PR schedules recovery on the same Topic
   assert.equal(run.phase, "recovering");
   assert.equal(run.resume_phase, "developer_implementing");
   const messageCount = ctx.catsco.topics.get(topic)!.messages.length;
-  run.next_retry_at = new Date(Date.now() - 1).toISOString();
-  await ctx.store.writeRun(run);
-  await ctx.controller.tick();
+  assert.ok(Date.parse(run.next_retry_at!) > Date.now());
+  await ctx.controller.reconcile(run.run_id);
   run = await ctx.store.readRun(run.run_id);
   assert.equal(run.phase, "developer_implementing");
   assert.equal(run.developer.topic_id, topic);

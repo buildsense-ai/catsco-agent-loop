@@ -189,7 +189,7 @@ export class LoopController {
         case "developer_implementing": return await this.reconcileDeveloper(run);
         case "waiting_ci": return await this.reconcileCi(run);
         case "monday_review": return await this.reconcileMondayReview(run);
-        case "recovering": return await this.performRecovery(run);
+        case "recovering": return await this.performRecovery(run, forced);
         case "blocked":
         case "blocked_auth":
         case "blocked_github_auth":
@@ -461,8 +461,8 @@ export class LoopController {
     return await this.transition(run, "recovering", "controller", run.waiting_for, `Episode ${episode.state}; reconciled side effects first and scheduled bounded recovery.`);
   }
 
-  private async performRecovery(run: LoopRun): Promise<LoopRun> {
-    if (!run.next_retry_at || Date.parse(run.next_retry_at) > Date.now()) return run;
+  private async performRecovery(run: LoopRun, forced = false): Promise<LoopRun> {
+    if (!run.next_retry_at || (!forced && Date.parse(run.next_retry_at) > Date.now())) return run;
     const phase = run.resume_phase;
     if (!phase) return await this.block(run, "Recovery phase lost its resume target.");
     run.phase = phase;
