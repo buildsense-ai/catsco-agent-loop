@@ -16,6 +16,8 @@
 
 普通 Monday 会话和普通 ZIP 永远不会自动进入 Loop。Controller 不审查代码、不修改代码、不代替 Agent comment/approve、不 merge/close PR，也不要求 Agent 输出结构化 JSON。
 
+本 Controller 只驱动可接受自然语言任务的通用 Developer。要求原生 `execute_attempt`、workspace lease 和 candidate event 的严格 Worker 属于独立 A2A Harness；两套协议不混合。若误选严格 Worker，Controller 识别其确定性协议拒绝并立即 `blocked`，不进行无意义恢复重试。
+
 ## 状态与证据
 
 ```text

@@ -2,7 +2,7 @@
   "catscoBaseUrl": "https://app.catsco.cc",
   "controllerUid": 363,
   "mondayAgentUid": 553,
-  "developerAgentUid": 559,
+  "developerAgentUid": 365,
   "mondayGithubLogin": "monday-reviewer-login",
   "developerGithubLogin": "developer-login",
   "stateDir": "/var/lib/catsco-agent-loop/runs",

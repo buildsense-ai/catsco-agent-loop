@@ -39,7 +39,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControllerConf
     catscoBaseUrl: text(env.CATSLOOP_CATSCO_BASE_URL ?? file.catscoBaseUrl),
     controllerUid: int(env.CATSLOOP_CONTROLLER_UID ?? file.controllerUid, 363),
     mondayAgentUid: int(env.CATSLOOP_MONDAY_UID ?? file.mondayAgentUid, 553),
-    developerAgentUid: int(env.CATSLOOP_DEVELOPER_UID ?? file.developerAgentUid, 559),
+    developerAgentUid: int(env.CATSLOOP_DEVELOPER_UID ?? file.developerAgentUid, 365),
     mondayGithubLogin: text(env.CATSLOOP_MONDAY_GITHUB_LOGIN ?? file.mondayGithubLogin),
     developerGithubLogin: text(env.CATSLOOP_DEVELOPER_GITHUB_LOGIN ?? file.developerGithubLogin),
     stateDir: resolve(text(env.CATSLOOP_STATE_DIR ?? file.stateDir, "./.runtime/runs")),

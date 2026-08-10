@@ -187,7 +187,7 @@ $("newRunForm").addEventListener("submit", async (event) => {
       developer_agent_uid: Number($("developerUid").value),
     }) });
     $("newRunDialog").close();
-    $("newRunForm").reset(); $("baseBranch").value = "main"; $("mondayUid").value = "553"; $("developerUid").value = "559";
+    $("newRunForm").reset(); $("baseBranch").value = "main"; $("mondayUid").value = "553"; $("developerUid").value = "365";
     await refresh(); await selectRun(run.run_id); toast("Run 已创建并排队");
   } catch (error) { toast(error.message); }
 });

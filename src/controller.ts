@@ -250,6 +250,9 @@ export class LoopController {
       await this.progress(run, "github_delivery", `Detected PR #${pull.number} at Head ${pull.head_sha}.`, { pr: pull.number, sha: pull.head_sha });
       return await this.transition(run, "waiting_ci", "github", `CI for ${pull.head_sha}`, "Developer GitHub delivery verified mechanically.");
     }
+    if (run.developer.protocol_error && run.developer.episode_started && run.developer.episode && EPISODE_TERMINAL.has(run.developer.episode.state)) {
+      return await this.block(run, run.developer.protocol_error);
+    }
     const missing = run.pr ? `a new Head SHA on existing PR #${run.pr.number}` : `an open PR from ${run.branch} to ${run.base_branch}`;
     return await this.recoverIfTerminal(run, run.developer, "Developer", missing);
   }
@@ -347,7 +350,13 @@ export class LoopController {
     ]);
     agent.episode = episode;
     const response = messages.filter((message) => message.from_uid === agent.agent_uid && message.id > (agent.dispatch_seq ?? 0)).at(-1);
-    if (response) agent.last_agent_seq = response.id;
+    if (response) {
+      agent.last_agent_seq = response.id;
+      const text = typeof response.content === "string" ? response.content : "";
+      if (agent === run.developer && /LOOP_WORKTREE_CONTRACT_V1|execute_attempt|workspaceLease|targetTopicId/.test(text)) {
+        agent.protocol_error = "Selected Developer is a strict execute_attempt worker and cannot accept direct-prompt Loop tasks. Choose a direct-capable Developer Agent or integrate the separate native A2A Harness.";
+      }
+    }
     agent.episode_started = Boolean(
       response || (episode?.run_id && episode.run_id !== agent.previous_episode_run_id),
     );

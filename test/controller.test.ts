@@ -184,3 +184,16 @@ test("crash reconciliation reuses an existing uniquely named Agent Task", async 
   assert.equal(persisted.monday.topic_id, task.topic);
   assert.equal(ctx.catsco.topics.size, 1);
 });
+
+test("strict execute_attempt worker refusal blocks immediately instead of retrying", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  const topic = run.developer.topic_id!;
+  ctx.catsco.agentReply(topic, "Missing LOOP_WORKTREE_CONTRACT_V1, workspaceLease and targetTopicId for execute_attempt.");
+  ctx.catsco.finish(topic);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "blocked");
+  assert.match(run.terminal_reason!, /strict execute_attempt worker/);
+  assert.equal(run.recovery_attempt, 0);
+});

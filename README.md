@@ -18,6 +18,8 @@ The Controller owns orchestration state. It does not modify CatsCompany, XiaoBa,
 - CatsCompany persistent user token, or account/password fallback
 - one configured Monday GitHub login and a different Developer GitHub login
 
+The direct-prompt controller requires a general-purpose coding Agent. A strict `execute_attempt` worker that requires `LOOP_WORKTREE_CONTRACT_V1`, workspace leases, and native candidate events belongs to the separate A2A Harness and is rejected explicitly instead of being retried with incomplete prompts.
+
 ```bash
 cp .env.example .env
 npm ci
