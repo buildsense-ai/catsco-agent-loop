@@ -53,11 +53,18 @@ export function mondayReviewPrompt(run: LoopRun): string {
     `CI state: ${run.ci?.state}`,
     checks,
     "",
+    `Required GitHub reviewer login: ${run.monday_github_login}`,
+    `Forbidden for review writes: ${run.developer_github_login} (Developer/PR author identity)` ,
+    `Before any GitHub write, verify the active gh identity and switch to ${run.monday_github_login}. If that credential is unavailable, report that exact authentication blocker instead of using another login.`,
+    "",
     "Review the exact current Head SHA. If changes are needed, leave a GitHub review/comment with the Monday GitHub identity and attach a new Finding ZIP here.",
     "If requirements are satisfied, submit an APPROVED GitHub review against the current Head SHA. Do not merge.",
   ].join("\n");
 }
 
 export function supplementPrompt(run: LoopRun, role: "Monday" | "Developer", missing: string): string {
-  return [capsule(run, role, missing), "", `The prior Episode ended, but Controller still cannot verify: ${missing}.`, "Do not redo completed work. Reconcile existing side effects and provide only the missing mechanical delivery."].join("\n");
+  const identity = role === "Monday"
+    ? `For GitHub review writes, the required login is ${run.monday_github_login}; do not use Developer login ${run.developer_github_login}. Verify or switch gh identity before writing.`
+    : `For implementation writes, use Developer login ${run.developer_github_login}.`;
+  return [capsule(run, role, missing), "", identity, `The prior Episode ended, but Controller still cannot verify: ${missing}.`, "Do not redo completed work. Reconcile existing side effects and provide only the missing mechanical delivery."].join("\n");
 }
