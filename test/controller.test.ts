@@ -189,13 +189,37 @@ test("strict execute_attempt worker refusal blocks immediately instead of retryi
   const ctx = await setup();
   let run = await advanceToDeveloper(ctx);
   const topic = run.developer.topic_id!;
-  ctx.catsco.agentReply(topic, "Missing LOOP_WORKTREE_CONTRACT_V1, workspaceLease and targetTopicId for execute_attempt.");
+  ctx.catsco.agentReply(topic, "Missing LOOP_WORKTREE_CONTRACT_V1, workspaceLease and targetTopicId for execute_attempt; cannot create or push the PR.");
   ctx.catsco.finish(topic);
   await ctx.controller.tick();
   run = await ctx.store.readRun(run.run_id);
   assert.equal(run.phase, "blocked");
   assert.match(run.terminal_reason!, /strict execute_attempt worker/);
   assert.equal(run.recovery_attempt, 0);
+});
+
+test("protocol names inside ordinary tool output do not misclassify a direct Developer", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  const topic = run.developer.topic_id!;
+  ctx.catsco.agentReply(topic, "Command completed: README says a strict execute_attempt worker requires LOOP_WORKTREE_CONTRACT_V1 and workspaceLease.");
+  ctx.catsco.finish(topic);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "recovering");
+  assert.equal(run.developer.protocol_error, undefined);
+});
+
+test("missing required Monday reviewer identity blocks GitHub auth without futile recovery", async () => {
+  const ctx = await setup();
+  let run = await advanceToReview(ctx);
+  ctx.catsco.agentReply(run.monday.topic_id!, "LOOP_BLOCKED_GITHUB_AUTH reviewer=monday-reviewer");
+  ctx.catsco.finish(run.monday.topic_id!);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "blocked_github_auth");
+  assert.equal(run.recovery_attempt, 0);
+  assert.match(run.last_error!, /monday-reviewer/);
 });
 
 test("manual reconcile and scheduler serialize per Run", async () => {

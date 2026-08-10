@@ -35,6 +35,7 @@ export interface AgentTurnState {
   last_agent_seq?: number;
   last_prompt_key?: string;
   protocol_error?: string;
+  github_auth_error?: string;
 }
 
 export interface FindingRecord {

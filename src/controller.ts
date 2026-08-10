@@ -178,6 +178,10 @@ export class LoopController {
         this.rememberResumePhase(run);
         return await this.transition(run, "blocked", "none", "manual message detected", "A non-Controller human message entered a controlled Topic; Run paused to prevent double driving.");
       }
+      if (run.pr && run.developer.protocol_error) {
+        run.developer.protocol_error = undefined;
+        await this.store.writeRun(run);
+      }
 
       switch (run.phase) {
         case "queued": return await this.beginMonday(run);
@@ -341,6 +345,11 @@ export class LoopController {
       });
       return await this.transition(run, "developer_implementing", "developer", "new Head SHA on the same PR", "Monday comment/review and new Finding ZIP were both verified and handed to the original Developer Topic.");
     }
+    if (run.monday.github_auth_error) {
+      this.rememberResumePhase(run);
+      run.last_error = run.monday.github_auth_error;
+      return await this.transition(run, "blocked_github_auth", "none", `GitHub reviewer identity ${run.monday_github_login}`, run.monday.github_auth_error);
+    }
     const missing = newComment ? "a new validated Finding ZIP" : newFinding ? "a Monday GitHub review/comment on the current PR Head" : "either current-SHA APPROVED, or both a GitHub review/comment and new Finding ZIP";
     return await this.recoverIfTerminal(run, run.monday, "Monday", missing);
   }
@@ -362,8 +371,18 @@ export class LoopController {
     if (response) {
       agent.last_agent_seq = response.id;
       const text = typeof response.content === "string" ? response.content : "";
-      if (agent === run.developer && /LOOP_WORKTREE_CONTRACT_V1|execute_attempt|workspaceLease|targetTopicId/.test(text)) {
+      const strictWorkerRefusal = /(?:missing|缺少|未收到)[\s\S]{0,600}(?:LOOP_WORKTREE_CONTRACT_V1|execute_attempt|workspaceLease|targetTopicId)/i.test(text)
+        && /(?:cannot|can't|refus|不能|无法)[\s\S]{0,600}(?:execute|proceed|create|push|执行|创建|推送|进入)/i.test(text);
+      if (agent === run.developer && strictWorkerRefusal) {
         agent.protocol_error = "Selected Developer is a strict execute_attempt worker and cannot accept direct-prompt Loop tasks. Choose a direct-capable Developer Agent or integrate the separate native A2A Harness.";
+      }
+      if (agent === run.monday) {
+        const marker = `LOOP_BLOCKED_GITHUB_AUTH reviewer=${run.monday_github_login}`;
+        const explicitUnavailable = text.includes(run.monday_github_login)
+          && /(?:credential|凭据|身份)[\s\S]{0,120}(?:unavailable|missing|未提供|不可用|无法)/i.test(text);
+        if (text.includes(marker) || explicitUnavailable) {
+          agent.github_auth_error = `Required Monday GitHub reviewer identity ${run.monday_github_login} is unavailable; Run and PR were preserved for operator recovery.`;
+        }
       }
     }
     agent.episode_started = Boolean(
@@ -423,6 +442,8 @@ export class LoopController {
     agent.episode = previous;
     agent.episode_started = false;
     agent.last_prompt_key = key;
+    agent.protocol_error = undefined;
+    agent.github_auth_error = undefined;
     run.updated_at = sentAt;
     await this.store.writeRun(run);
     await this.store.appendEvent(run, { type: "message_dispatched", message: `Idempotent message dispatched to ${input.topicId}.`, data: { action, message_id: receipt.id, duplicate: receipt.duplicate ?? false } });
