@@ -3,204 +3,81 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <meta name="description" content="CatsCompany 双 Agent 自迭代 Loop 控制台">
-  <title>Agent Loop Control</title>
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="双智能体自迭代任务台">
+  <title>自迭代任务台</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="noise" aria-hidden="true"></div>
-
   <header class="topbar">
-    <a class="brand" href="#" aria-label="Agent Loop Control 首页">
-      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-      <span><b>Agent Loop</b><small>CONTROL / 01</small></span>
+    <a class="brand" href="#" aria-label="自迭代任务台首页">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i></span>
+      <span><b>自迭代任务台</b><small>问题发现 · 开发实现 · 审核收束</small></span>
     </a>
     <div class="topbar-actions">
-      <div class="connection-state" id="connectionState" data-state="offline">
-        <span></span><b id="healthText">未连接</b>
-      </div>
-      <button class="button button-ghost" id="connectionButton" type="button">连接设置</button>
-      <button class="button button-primary" id="newRunButton" type="button"><span>＋</span> 新建 Loop</button>
+      <span class="connection-state" id="connectionState" data-state="offline"><i></i><b id="healthText">未连接</b></span>
+      <button class="icon-button" id="connectionButton" type="button" aria-label="连接设置" title="连接设置">⌘</button>
+      <button class="primary-button" id="newRunButton" type="button"><span>＋</span> 新建任务</button>
     </div>
   </header>
 
-  <main class="layout">
-    <aside class="run-sidebar" aria-label="任务列表">
-      <div class="sidebar-head">
-        <div><span>RUN QUEUE</span><b id="runCount">0</b></div>
-        <button class="square-button" id="refreshButton" type="button" aria-label="刷新任务">↻</button>
+  <main class="page-shell">
+    <section class="page-intro">
+      <div>
+        <p>任务总览</p>
+        <h1>每个问题，沿着同一条链路走到批准。</h1>
       </div>
-      <div class="run-filters" role="group" aria-label="任务筛选">
-        <button class="active" type="button" data-filter="all">全部</button>
-        <button type="button" data-filter="active">进行中</button>
-        <button type="button" data-filter="done">已结束</button>
+      <div class="summary-counts" aria-label="任务统计">
+        <span><i class="active-dot"></i>进行中 <b id="activeCount">0</b></span>
+        <span><i class="done-dot"></i>已结束 <b id="doneCount">0</b></span>
       </div>
-      <div class="run-list" id="runList" aria-live="polite">
-        <div class="sidebar-empty">连接 Controller 后显示任务</div>
+    </section>
+
+    <section class="task-toolbar">
+      <div class="filters" role="group" aria-label="任务筛选">
+        <button class="active" type="button" data-filter="all">全部任务</button>
+        <button type="button" data-filter="active">正在处理</button>
+        <button type="button" data-filter="done">已经结束</button>
       </div>
-      <div class="sidebar-foot">
-        <span>LAST SYNC</span>
-        <time id="lastSync">—</time>
-      </div>
-    </aside>
+      <div class="toolbar-note"><span id="runCount">0 个任务</span><i></i><time id="lastSync">尚未同步</time><button id="refreshButton" type="button">刷新</button></div>
+    </section>
 
-    <section class="workspace">
-      <div class="welcome" id="emptyState">
-        <div class="welcome-orbit" aria-hidden="true"><span>M</span><i></i><span>D</span></div>
-        <p class="kicker">EXPLICIT ENTRY ONLY</p>
-        <h1>把一个要求，<br>交给两位 Agent 跑成闭环。</h1>
-        <p>只有从这里创建的任务才会进入自迭代。普通 Monday 会话和普通 ZIP 不会被自动接管。</p>
-        <div class="welcome-actions">
-          <button class="button button-primary button-large" id="emptyStartButton" type="button">开始一个 Loop <span>↗</span></button>
-          <span>Monday 调查 → Developer 实现 → CI → Monday 审核</span>
-        </div>
-      </div>
-
-      <div class="run-view" id="runView" hidden>
-        <section class="run-hero">
-          <div class="run-title-block">
-            <p class="kicker" id="runId">RUN —</p>
-            <h1 id="runTitle">—</h1>
-            <details class="request-details">
-              <summary>查看完整实现要求</summary>
-              <p id="runRequest">—</p>
-            </details>
-            <div class="run-links">
-              <span id="repoLabel">—</span>
-              <a id="prLink" target="_blank" rel="noopener noreferrer" hidden>打开 PR ↗</a>
-            </div>
-          </div>
-          <div class="run-status-card">
-            <span>CURRENT OWNER</span>
-            <strong id="activeActor">—</strong>
-            <small id="waitingFor">—</small>
-            <div class="activity-line"><i id="activityDot"></i><span id="activityLabel">—</span></div>
-          </div>
-        </section>
-
-        <nav class="phase-track" id="phaseTrack" aria-label="Loop 阶段">
-          <div data-stage="monday_finding"><span>01</span><b>Finding</b><small>Monday</small></div>
-          <i></i>
-          <div data-stage="developer_implementing"><span>02</span><b>Build</b><small>Developer</small></div>
-          <i></i>
-          <div data-stage="waiting_ci"><span>03</span><b>CI</b><small>GitHub</small></div>
-          <i></i>
-          <div data-stage="monday_review"><span>04</span><b>Review</b><small>Monday</small></div>
-          <i></i>
-          <div data-stage="completed"><span>05</span><b>Approved</b><small>Stop</small></div>
-        </nav>
-
-        <section class="control-grid">
-          <article class="control-card cycle-card">
-            <header><span>REVIEW CYCLE</span><b id="cycleBadge">未开始</b></header>
-            <div class="cycle-visual">
-              <div><small>PR HEAD</small><strong id="cycleHead">—</strong></div>
-              <span class="cycle-arrow">→</span>
-              <div><small>状态</small><strong id="cycleStatus">—</strong></div>
-            </div>
-            <p id="cycleHint">CI 通过后创建审核轮次。</p>
-          </article>
-
-          <article class="control-card metric-card">
-            <header><span>ITERATION</span><b id="iteration">00</b></header>
-            <dl>
-              <div><dt>Monday</dt><dd id="mondayAttempts">0</dd></div>
-              <div><dt>Developer</dt><dd id="developerAttempts">0</dd></div>
-              <div><dt>Recovery</dt><dd id="recoveryAttempts">0</dd></div>
-            </dl>
-          </article>
-
-          <article class="control-card metric-card ci-card">
-            <header><span>CI STATUS</span><b id="ciState">—</b></header>
-            <dl>
-              <div><dt>Head</dt><dd id="headSha">—</dd></div>
-              <div><dt>Checks</dt><dd id="checkCount">0</dd></div>
-              <div><dt>Progress</dt><dd id="lastProgress">—</dd></div>
-            </dl>
-          </article>
-        </section>
-
-        <section class="content-grid">
-          <div class="left-column">
-            <article class="panel evidence-panel">
-              <header class="panel-head"><div><span>MECHANICAL EVIDENCE</span><h2>真实交付</h2></div><b>LIVE</b></header>
-              <div class="evidence-flow">
-                <div class="evidence-node"><span>ZIP</span><strong id="findingLabel">尚未交付</strong><small id="findingMeta">—</small></div>
-                <i></i>
-                <div class="evidence-node"><span>PR</span><strong id="prLabel">尚未创建</strong><small id="branchLabel">—</small></div>
-                <i></i>
-                <div class="evidence-node"><span>REVIEW</span><strong id="reviewLabel">等待审核</strong><small id="reviewMeta">—</small></div>
-              </div>
-            </article>
-
-            <article class="panel agent-panel">
-              <header class="panel-head"><div><span>CONTROLLED TOPICS</span><h2>Agent 状态</h2></div><b id="topicCount">0 / 2</b></header>
-              <div class="agent-row">
-                <div class="agent-avatar monday">M</div>
-                <div><b>Monday</b><small id="mondayTopic">Topic 尚未创建</small></div>
-                <span id="mondayEpisode" class="episode-pill">未观测</span>
-              </div>
-              <div class="agent-row">
-                <div class="agent-avatar developer">D</div>
-                <div><b>Developer</b><small id="developerTopic">Topic 尚未创建</small></div>
-                <span id="developerEpisode" class="episode-pill">未观测</span>
-              </div>
-              <p class="agent-note">Episode 只是运行观测；是否完成以右侧机械证据为准。</p>
-            </article>
-
-            <article class="panel history-panel">
-              <header class="panel-head"><div><span>RETAINED HISTORY</span><h2>审核轮次与 ZIP</h2></div><b id="historyCount">0</b></header>
-              <div class="history-list" id="historyList"><p>暂无审核轮次。</p></div>
-            </article>
-          </div>
-
-          <article class="panel timeline-panel">
-              <header class="panel-head"><div><span>EVENT LEDGER</span><h2>发生了什么</h2></div><div class="panel-tools"><b id="eventCount">0</b><button id="eventToggle" type="button">展开全部</button></div></header>
-            <ol class="timeline" id="timeline"><li class="timeline-empty">暂无事件。</li></ol>
-          </article>
-        </section>
-
-        <footer class="run-actions">
-          <span id="terminalReason">Controller 只核对证据，不替 Agent comment、approve 或 merge。</span>
-          <div>
-            <button class="button button-ghost" id="reconcileButton" type="button">立即核对</button>
-            <button class="button button-secondary" id="resumeButton" type="button" hidden>恢复 Run</button>
-            <button class="button button-danger" id="cancelButton" type="button">取消</button>
-          </div>
-        </footer>
+    <section class="task-list" id="runList" aria-live="polite">
+      <div class="empty-state" id="emptyState">
+        <span>01</span>
+        <h2>还没有进入循环的任务</h2>
+        <p>只有从这里明确创建的任务才会启动双智能体自迭代；普通会话和普通 ZIP 不会被接管。</p>
+        <button class="primary-button" id="emptyStartButton" type="button">新建第一个任务</button>
       </div>
     </section>
   </main>
 
   <dialog id="connectionDialog">
     <form class="dialog-card" id="connectionForm">
-      <div class="dialog-head"><div><p class="kicker">SECURE SESSION</p><h2>连接 Controller</h2></div><button type="button" class="dialog-close" data-close>×</button></div>
-      <label>API 地址<input id="apiUrl" type="url" required placeholder="https://agent-365.artifacts.catsco.fun:19993"></label>
-      <label>操作员 Token<input id="operatorToken" type="password" required autocomplete="off"></label>
-      <p class="dialog-note">Token 只保存在当前标签页的 sessionStorage，不写入 Artifact 文件。</p>
-      <button class="button button-primary button-large" type="submit">验证并连接</button>
+      <div class="dialog-head"><div><small>安全连接</small><h2>连接任务调度器</h2></div><button type="button" class="dialog-close" data-close>×</button></div>
+      <label>接口地址<input id="apiUrl" type="url" required placeholder="https://example.com:19993"></label>
+      <label>操作员令牌<input id="operatorToken" type="password" autocomplete="off" required></label>
+      <p class="dialog-note">令牌只保存在当前标签页，不写入页面文件。</p>
+      <div class="dialog-actions"><button class="primary-button" type="submit">验证并连接</button></div>
     </form>
   </dialog>
 
-  <dialog id="newRunDialog">
-    <form class="dialog-card dialog-wide" id="newRunForm">
-      <div class="dialog-head"><div><p class="kicker">EXPLICIT LOOP ENTRY</p><h2>新建自迭代任务</h2></div><button type="button" class="dialog-close" data-close>×</button></div>
-      <label>自然语言实现要求<textarea id="requestInput" rows="7" required placeholder="说明需要实现什么、成功标准和不能做什么。"></textarea></label>
+  <dialog id="newRunDialog" class="wide-dialog">
+    <form class="dialog-card" id="newRunForm">
+      <div class="dialog-head"><div><small>明确启动</small><h2>新建自迭代任务</h2></div><button type="button" class="dialog-close" data-close>×</button></div>
+      <label>需要解决的问题<textarea id="requestInput" rows="7" required placeholder="用自然语言说明实现要求、验收标准和不能做的事。"></textarea></label>
       <div class="field-grid">
         <label>GitHub 仓库<input id="repoInput" required placeholder="owner/repository"></label>
-        <label>Base 分支<input id="baseBranchInput" required value="main"></label>
-        <label>Monday UID<input id="mondayUidInput" type="number" min="1" required value="553"></label>
-        <label>Developer UID<input id="developerUidInput" type="number" min="1" required value="365"></label>
+        <label>基础分支<input id="baseBranchInput" required value="main"></label>
+        <label>审查者 UID<input id="mondayUidInput" type="number" min="1" required value="553"></label>
+        <label>开发者 UID<input id="developerUidInput" type="number" min="1" required value="365"></label>
       </div>
-      <div class="dialog-submit">
-        <p>创建后 Controller 才会建立两条受控会话。普通 ZIP 不会触发 Loop。</p>
-        <button class="button button-primary button-large" type="submit">创建并开始 <span>↗</span></button>
-      </div>
+      <p class="dialog-note">创建后才会建立两条受控会话。调度器只核对交付，不代替智能体评论、批准或合并 PR。</p>
+      <div class="dialog-actions"><button class="primary-button" type="submit">创建并开始</button></div>
     </form>
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="app.js" defer></script>
+  <script src="app.js"></script>
 </body>
 </html>

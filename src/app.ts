@@ -1,6 +1,10 @@
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { pipeline } from "node:stream/promises";
 import type { LoopController } from "./controller.js";
+import { readFindingMarkdown } from "./finding-reader.js";
 import type { RunStore } from "./store.js";
 import type { CreateRunInput } from "./types.js";
 
@@ -70,6 +74,28 @@ export function createLoopApi(controller: LoopController, store: RunStore) {
       }
       if (request.method === "GET" && url.pathname === "/api/runs") {
         send(response, 200, { runs: await store.listRuns() });
+        return;
+      }
+      const findingMatch = url.pathname.match(/^\/api\/runs\/(run_[A-Za-z0-9_-]+)\/findings\/([1-9][0-9]*)(?:\/(download))?$/);
+      if (request.method === "GET" && findingMatch) {
+        const runId = findingMatch[1]!;
+        const version = Number(findingMatch[2]);
+        const run = await store.readRun(runId);
+        const finding = run.finding_history.find((item) => item.version === version);
+        if (!finding) throw new HttpError(404, "finding not found");
+        const path = await store.findingPath(runId, version);
+        const info = await stat(path);
+        if (findingMatch[3] === "download") {
+          response.writeHead(200, {
+            "content-type": "application/zip",
+            "content-length": info.size,
+            "content-disposition": `attachment; filename="finding-v${version}.zip"`,
+            "cache-control": "private, no-store",
+          });
+          await pipeline(createReadStream(path), response);
+          return;
+        }
+        send(response, 200, { finding, markdown: await readFindingMarkdown(path) });
         return;
       }
       const match = url.pathname.match(/^\/api\/runs\/(run_[A-Za-z0-9_-]+)(?:\/(events|resume|reconcile|cancel))?$/);
