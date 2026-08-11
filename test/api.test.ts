@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -41,6 +41,46 @@ function runFixture(): LoopRun {
   };
 }
 
+class PausingReadStore extends RunStore {
+  private pauseNextRead = false;
+  private reading = false;
+  private signalEntered: () => void = () => {};
+  private releaseGate: () => void = () => {};
+  private gate: Promise<void> = Promise.resolve();
+  entered: Promise<void> = Promise.resolve();
+  writesDuringRead = 0;
+
+  arm(): void {
+    this.pauseNextRead = true;
+    this.entered = new Promise<void>((resolve) => { this.signalEntered = resolve; });
+    this.gate = new Promise<void>((resolve) => { this.releaseGate = resolve; });
+  }
+
+  release(): void {
+    this.releaseGate();
+  }
+
+  override async readRun(runId: string): Promise<LoopRun> {
+    this.reading = true;
+    try {
+      const run = await super.readRun(runId);
+      if (this.pauseNextRead) {
+        this.pauseNextRead = false;
+        this.signalEntered();
+        await this.gate;
+      }
+      return run;
+    } finally {
+      this.reading = false;
+    }
+  }
+
+  override async writeRun(run: LoopRun): Promise<void> {
+    if (this.reading) this.writesDuringRead += 1;
+    await super.writeRun(run);
+  }
+}
+
 test("API requires operator token, enforces exact CORS origin, and discloses Run timing fields", async () => {
   const root = await mkdtemp(join(tmpdir(), "catsloop-api-"));
   const store = new RunStore(root);
@@ -70,6 +110,65 @@ test("API requires operator token, enforces exact CORS origin, and discloses Run
     const denied = await fetch(`${base}/api/runs`, { headers: { authorization: "Bearer secret", origin: "https://evil.example" } });
     assert.equal(denied.status, 403);
   } finally {
+    await api.close();
+  }
+});
+
+test("stale API read cannot overwrite a fresh Controller write", async () => {
+  const root = await mkdtemp(join(tmpdir(), "catsloop-api-race-"));
+  const store = new PausingReadStore(root, 20 * 60_000);
+  const stale = runFixture();
+  stale.run_id = "run_api_race";
+  stale.phase = "developer_implementing";
+  stale.active_actor = "developer";
+  stale.waiting_for = "an open PR";
+  stale.branch = "loop/run_api_race";
+  stale.developer = { ...stale.developer, topic_id: "grp_developer" };
+  stale.last_activity_at = "2000-01-01T00:00:00.000Z";
+  stale.activity_state = "quiet";
+  await store.initialize(stale);
+  const controller = {
+    config: { operatorToken: "secret", allowedOrigin: "https://artifact.example:19991" },
+  } as unknown as LoopController;
+  const api = createLoopApi(controller, store);
+  const address = await api.listen("127.0.0.1", 0);
+  const base = `http://127.0.0.1:${address.port}`;
+  const headers = { authorization: "Bearer secret", origin: "https://artifact.example:19991" };
+  try {
+    store.arm();
+    const staleResponsePromise = fetch(`${base}/api/runs/${stale.run_id}`, { headers });
+    await store.entered;
+    const fresh = structuredClone(stale);
+    fresh.updated_at = new Date(Date.now() + 1_000).toISOString();
+    fresh.last_progress_at = fresh.updated_at;
+    fresh.waiting_for = "CI for fresh-sha";
+    fresh.pr = {
+      number: 3,
+      url: "https://github.com/acme/widget/pull/3",
+      state: "OPEN",
+      base_ref: "main",
+      head_ref: fresh.branch,
+      head_sha: "fresh-sha",
+      author_login: "developer",
+      head_repository: "acme/widget",
+      head_repository_owner: "acme",
+      first_seen_at: fresh.updated_at,
+    };
+    await RunStore.prototype.writeRun.call(store, fresh);
+    store.release();
+    const staleResponse = await staleResponsePromise;
+    assert.equal(staleResponse.status, 200);
+    const staleBody = await staleResponse.json() as LoopRun;
+    assert.equal(staleBody.activity_state, "suspected_stall");
+    assert.equal(staleBody.last_activity_at, stale.last_activity_at);
+    assert.equal(staleBody.last_progress_at, stale.last_progress_at);
+    assert.equal(store.writesDuringRead, 0, "GET/readRun must not write a normalized snapshot");
+    const persisted = JSON.parse(await readFile(join(root, stale.run_id, "run.json"), "utf8")) as LoopRun;
+    assert.equal(persisted.pr?.head_sha, "fresh-sha");
+    assert.equal(persisted.waiting_for, "CI for fresh-sha");
+    assert.equal(persisted.last_progress_at, fresh.last_progress_at);
+  } finally {
+    store.release();
     await api.close();
   }
 });

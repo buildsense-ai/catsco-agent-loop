@@ -47,21 +47,13 @@ export class RunStore {
 
   async readRun(runId: string): Promise<LoopRun> {
     const run = JSON.parse(await readFile(join(this.runDir(runId), "run.json"), "utf8")) as LoopRun;
-    let changed = false;
     if (!run.last_activity_at) {
       run.last_activity_at = run.last_progress_at || run.updated_at || run.created_at;
-      changed = true;
     }
-    const state = computeActivityState(run, Date.now(), this.activityStallMs);
-    if (run.activity_state !== state) {
-      run.activity_state = state;
-      changed = true;
-    }
+    run.activity_state = computeActivityState(run, Date.now(), this.activityStallMs);
     if (!run.review_progress_evidence_ids) {
       run.review_progress_evidence_ids = [];
-      changed = true;
     }
-    if (changed) await this.writeRun(run);
     return run;
   }
 

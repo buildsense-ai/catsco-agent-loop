@@ -491,7 +491,7 @@ test("absolute Run limit sweeps queued Runs outside the active slot", async () =
   assert.match(queued.terminal_reason!, /absolute limit/);
 });
 
-test("legacy run.json is normalized with activity disclosure fields", async () => {
+test("legacy run.json is normalized in memory without mutating persisted state", async () => {
   const ctx = await setup();
   const run = await ctx.controller.createRun({ request: "work", repo: "acme/widget" });
   const path = join(ctx.config.stateDir, run.run_id, "run.json");
@@ -499,14 +499,13 @@ test("legacy run.json is normalized with activity disclosure fields", async () =
   delete legacy.last_activity_at;
   delete legacy.activity_state;
   delete legacy.review_progress_evidence_ids;
-  await writeFile(path, `${JSON.stringify(legacy, null, 2)}\n`);
+  const persistedBeforeRead = `${JSON.stringify(legacy, null, 2)}\n`;
+  await writeFile(path, persistedBeforeRead);
   const normalized = await ctx.store.readRun(run.run_id);
   assert.equal(normalized.last_activity_at, normalized.last_progress_at);
   assert.equal(normalized.activity_state, "quiet");
-  const persisted = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-  assert.ok(persisted.last_activity_at);
-  assert.ok(persisted.activity_state);
-  assert.ok(Array.isArray(persisted.review_progress_evidence_ids));
+  assert.deepEqual(normalized.review_progress_evidence_ids, []);
+  assert.equal(await readFile(path, "utf8"), persistedBeforeRead);
 });
 
 test("manual reconcile and scheduler serialize per Run", async () => {
