@@ -32,12 +32,14 @@ queued → monday_finding → developer_implementing → waiting_ci → monday_r
 
 Topic 是长期会话 ID；Episode `run_id` 是每次输入触发的运行 ID，不是 Controller 阶段。发送前记录旧 Episode、消息 seq 和稳定 `client_msg_id`；只有新 Episode 或发送后 Agent 消息才能证明本轮已启动。旧 `completed` 不能完成新一轮。
 
+Episode 状态同时记录 `episode_observed_at`，只表示最后一次观测；界面必须以 `active_actor` 判断当前由谁工作，不能把非活跃 Agent 的旧 `running` 快照显示为仍在调度。
+
 Run 目录保存原子 `run.json`、只追加 `events.jsonl`、`request.md` 和经 SHA-256/ZIP 合约验证的 `files/finding-vN.zip`。Controller 重启后先 Reconcile CatsCompany 与 GitHub 副作用，再决定是否续发。
 
 ## 完成条件
 
 - Finding：来自本轮 dispatch seq 之后，可下载、路径安全，包含 `FINDING.md` 和 `manifest.json`。
-- Developer 首轮：正确仓库/base/`loop/<run_id>` 的 open PR；后续轮：同一 PR 的新 Head SHA。
+- Developer 首轮：由配置的 Developer GitHub login 创建、来自正确仓库、base/`loop/<run_id>` 的 open PR；后续轮：同一 PR 的新 Head SHA。
 - CI：当前 SHA 的 checks 成功；明确无 checks 时经过 grace window 后视为 no-check success。
 - Monday 继续：本轮之后由配置的 Monday GitHub login 留下 comment/review，同时原 Monday Topic 产生新的有效 Finding ZIP。
 - Monday 完成：配置的 Monday GitHub login 对当前 Head SHA 提交 `APPROVED`，且当前 SHA 的 CI 已通过。

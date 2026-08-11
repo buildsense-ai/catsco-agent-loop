@@ -48,6 +48,7 @@ loopctl cancel --run run_...
 - A new Episode run ID is expected after each continuation, while the Topic and Controller Run stay fixed.
 - A valid Finding ZIP is downloaded, SHA-256 hashed, path-checked, and required to contain `FINDING.md` and `manifest.json`.
 - A revision requires the same PR and a new Head SHA.
+- The PR author must match the configured Developer GitHub login and the head repository must be the controlled repository.
 - CI failure is returned to Developer; Controller does not rerun workflows.
 - Continue requires both Monday GitHub feedback and a new Finding ZIP.
 - Completion requires Monday `APPROVED` on the current Head SHA after CI success/no-check confirmation.
@@ -55,6 +56,7 @@ loopctl cancel --run run_...
 - Controller never merges, closes, or comments on the PR.
 
 State is stored as atomic `run.json`, append-only `events.jsonl`, `request.md`, and validated ZIP copies below the configured run directory. On restart the scheduler reconciles external side effects before any resend.
+Episode state is a timestamped observation; `active_actor` is authoritative for who the Controller is currently driving.
 
 ## API
 

@@ -53,6 +53,12 @@ function create(tag, className, text) {
   return node;
 }
 
+function episodeObservation(agent, isActive) {
+  if (!agent?.episode) return "not observed";
+  const observed = agent.episode_observed_at ? `observed ${age(agent.episode_observed_at)}` : "observation time unknown";
+  return `${agent.episode.state} · ${observed} · ${isActive ? "ACTIVE" : "inactive snapshot"}`;
+}
+
 function renderRuns() {
   const list = $("runList");
   list.replaceChildren();
@@ -93,7 +99,9 @@ function renderDetail() {
   setText("branch", run.branch);
   setText("finding", run.latest_finding ? `v${run.latest_finding.version} · ${short(run.latest_finding.sha256, 14)} · ${Math.ceil(run.latest_finding.size / 1024)} KB` : "—");
   setText("mondayTopic", run.monday.topic_id || "—");
+  setText("mondayObservation", episodeObservation(run.monday, run.active_actor === "monday"));
   setText("developerTopic", run.developer.topic_id || "—");
+  setText("developerObservation", episodeObservation(run.developer, run.active_actor === "developer"));
   const pr = $("pullRequest");
   pr.replaceChildren();
   if (run.pr?.url) {
