@@ -60,15 +60,18 @@ class PausingReadStore extends RunStore {
     this.releaseGate();
   }
 
+  private async pauseIfArmed(): Promise<void> {
+    if (!this.pauseNextRead) return;
+    this.pauseNextRead = false;
+    this.signalEntered();
+    await this.gate;
+  }
+
   override async readRun(runId: string): Promise<LoopRun> {
     this.reading = true;
     try {
       const run = await super.readRun(runId);
-      if (this.pauseNextRead) {
-        this.pauseNextRead = false;
-        this.signalEntered();
-        await this.gate;
-      }
+      await this.pauseIfArmed();
       return run;
     } finally {
       this.reading = false;
@@ -76,7 +79,14 @@ class PausingReadStore extends RunStore {
   }
 
   override async writeRun(run: LoopRun): Promise<void> {
-    if (this.reading) this.writesDuringRead += 1;
+    if (this.reading) {
+      this.writesDuringRead += 1;
+      // With the old implementation, readRun() called this method after
+      // parsing its stale snapshot. Pause that stale write until the test has
+      // persisted a newer Controller snapshot, then release it so the test
+      // deterministically exercises the destructive interleaving.
+      await this.pauseIfArmed();
+    }
     await super.writeRun(run);
   }
 }
