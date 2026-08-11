@@ -11,6 +11,7 @@ function capsule(run: LoopRun, role: "Monday" | "Developer", missing: string): s
     `Branch: ${run.branch}`,
     run.pr ? `PR: ${run.pr.url}` : "PR: not created yet",
     run.pr ? `Current Head SHA: ${run.pr.head_sha}` : "Current Head SHA: unavailable",
+    run.review_cycle ? `Review Cycle: ${run.review_cycle.cycle} (bound to Head ${run.review_cycle.head_sha})` : "Review Cycle: not started",
     `Current missing mechanical delivery: ${missing}`,
     "Controller state is authoritative; continue this same task in this same conversation.",
   ].join("\n");
@@ -49,6 +50,7 @@ export function mondayReviewPrompt(run: LoopRun): string {
     capsule(run, "Monday", "APPROVED on the current SHA, or both a GitHub review/comment and a new Finding ZIP"),
     "",
     `Review PR: ${run.pr?.url}`,
+    `Review Cycle: ${run.review_cycle?.cycle}`,
     `Exact Head SHA: ${run.pr?.head_sha}`,
     `CI state: ${run.ci?.state}`,
     checks,
@@ -57,7 +59,7 @@ export function mondayReviewPrompt(run: LoopRun): string {
     `Forbidden for review writes: ${run.developer_github_login} (Developer/PR author identity)` ,
     `Before any GitHub write, verify the active gh identity and switch to ${run.monday_github_login}. If that credential is unavailable, do not use another login and do not substitute an issue comment; include this exact line in your final reply: LOOP_BLOCKED_GITHUB_AUTH reviewer=${run.monday_github_login}`,
     "",
-    "Review the exact current Head SHA. If changes are needed, leave a GitHub review/comment with the Monday GitHub identity and attach a new Finding ZIP here.",
+    "Review the exact current Head SHA for this Review Cycle. If changes are needed, leave a GitHub review/comment with the Monday GitHub identity and attach a new Finding ZIP here; both deliveries belong only to this Cycle and Head.",
     "If requirements are satisfied, submit an APPROVED GitHub review against the current Head SHA. Do not merge.",
   ].join("\n");
 }

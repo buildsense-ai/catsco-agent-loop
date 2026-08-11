@@ -103,7 +103,7 @@ export class LoopController {
     const runId = makeRunId();
     const created = now();
     const run: LoopRun = {
-      schema_version: 1,
+      schema_version: 2,
       run_id: runId,
       phase: "queued",
       active_actor: "controller",
@@ -120,6 +120,8 @@ export class LoopController {
       developer_github_login: input.developer_github_login?.trim() || this.config.developerGithubLogin,
       monday: { agent_uid: input.monday_agent_uid ?? this.config.mondayAgentUid, episode_started: false },
       developer: { agent_uid: input.developer_agent_uid ?? this.config.developerAgentUid, episode_started: false },
+      finding_history: [],
+      review_cycles: [],
       review_baseline_comment_ids: [],
       review_progress_evidence_ids: [],
       sent_message_ids: [],
@@ -166,16 +168,17 @@ export class LoopController {
       const phase = run.resume_phase ?? this.inferResumePhase(run);
       if (reviewerAuthBlocked && phase === "monday_review" && run.monday.topic_id) {
         run.monday.github_auth_error = undefined;
-        // A Finding captured before reviewer credentials were restored is only
-        // a partial delivery from the failed review attempt. Do not pair it
-        // with a later review from the restored identity.
-        run.pending_review_finding = undefined;
+        // Preserve the failed attempt as a completed historical cycle, then
+        // start a clean cycle so its ZIP cannot pair with later GitHub evidence.
+        const cycle = await this.startReviewCycle(run, "Reviewer credentials were restored; prior partial delivery was archived.");
         run.monday_attempt += 1;
-        await this.dispatch(run, run.monday, `monday-auth-resume-${run.monday_attempt}-${run.pr?.head_sha.slice(0, 8) ?? "nohead"}`, {
+        await this.dispatch(run, run.monday, `monday-auth-resume-cycle-${cycle.cycle}-${run.pr?.head_sha.slice(0, 8) ?? "nohead"}`, {
           topicId: run.monday.topic_id,
           clientMsgId: "",
           text: supplementPrompt(run, "Monday", `a ${run.monday_github_login} GitHub review on the current PR Head`),
         });
+        run.review_dispatch_seq = run.monday.dispatch_seq;
+        cycle.dispatch_seq = run.monday.dispatch_seq;
         return await this.transition(run, phase, this.actorFor(phase), `GitHub review by ${run.monday_github_login}`, "Reviewer credentials were marked restored; a fresh prompt was sent to the original Monday Topic.");
       }
       return await this.transition(run, phase, this.actorFor(phase), "manual reconciliation", "Operator resumed the existing Run; no new Topic was created.");
@@ -288,7 +291,7 @@ export class LoopController {
   }
 
   private async reconcileMondayFinding(run: LoopRun, allowRecovery = true): Promise<LoopRun> {
-    const finding = await this.findAndStoreFinding(run, run.monday, run.latest_finding?.source_message_id ?? 0);
+    const finding = await this.findAndStoreFinding(run, run.monday, run.latest_finding?.source_message_id ?? 0, { purpose: "initial" });
     if (finding) {
       run.latest_finding = finding;
       const taskName = `Loop ${run.run_id} · Developer`;
@@ -373,15 +376,69 @@ export class LoopController {
       });
       return await this.transition(run, "developer_implementing", "developer", "new Head SHA fixing CI", "CI failure returned to the same Developer Topic; Controller did not rerun CI.");
     }
-    const evidence = await this.github.getReviewEvidence(run.repo, run.pr.number);
-    run.review_baseline_comment_ids = evidence.map((item) => item.id);
-    run.review_requested_at = now();
+    const cycle = await this.startReviewCycle(run, "CI completed; Monday review requested.");
     run.monday_attempt += 1;
-    await this.dispatch(run, run.monday, `monday-review-${run.iteration}-${run.pr.head_sha.slice(0, 8)}`, {
+    await this.dispatch(run, run.monday, `monday-review-cycle-${cycle.cycle}-${run.pr.head_sha.slice(0, 8)}`, {
       topicId: run.monday.topic_id!, clientMsgId: "", text: mondayReviewPrompt(run),
     });
     run.review_dispatch_seq = run.monday.dispatch_seq;
+    cycle.dispatch_seq = run.monday.dispatch_seq;
     return await this.transition(run, "monday_review", "monday", "current-SHA approval or comment plus new Finding ZIP", `CI ${run.ci.state}; review request sent to the original Monday Topic.`);
+  }
+
+  private async startReviewCycle(run: LoopRun, reason: string): Promise<NonNullable<LoopRun["review_cycle"]>> {
+    if (!run.pr) throw new Error("Cannot start a review cycle without a tracked PR");
+    this.finishReviewCycle(run, "superseded", undefined, reason);
+    const evidence = await this.github.getReviewEvidence(run.repo, run.pr.number);
+    const requestedAt = now();
+    const cycle = {
+      cycle: Math.max(0, ...run.review_cycles.map((item) => item.cycle)) + 1,
+      pr_number: run.pr.number,
+      head_sha: run.pr.head_sha,
+      requested_at: requestedAt,
+      baseline_evidence_ids: evidence.map((item) => item.id),
+      status: "active" as const,
+    };
+    run.review_cycle = cycle;
+    run.review_cycles.push(cycle);
+    // Keep the original top-level fields as current-cycle compatibility aliases.
+    run.review_baseline_comment_ids = [...cycle.baseline_evidence_ids];
+    run.review_requested_at = requestedAt;
+    run.review_dispatch_seq = undefined;
+    run.pending_review_finding = undefined;
+    await this.store.writeRun(run);
+    await this.store.appendEvent(run, {
+      type: "review_cycle_started",
+      message: `Review cycle ${cycle.cycle} started for PR #${cycle.pr_number} at Head ${cycle.head_sha}.`,
+      data: { review_cycle: cycle.cycle, pr: cycle.pr_number, head_sha: cycle.head_sha },
+    });
+    return cycle;
+  }
+
+  private finishReviewCycle(
+    run: LoopRun,
+    status: "revision_requested" | "approved" | "superseded",
+    evidence?: ReviewEvidence,
+    reason?: string,
+  ): void {
+    const cycle = run.review_cycle;
+    if (!cycle || cycle.status !== "active") return;
+    if (!cycle.finding && run.pending_review_finding?.review_cycle === cycle.cycle) {
+      cycle.finding = run.pending_review_finding;
+    }
+    cycle.status = status;
+    cycle.completed_at = now();
+    if (evidence) cycle.evidence = evidence;
+    if (reason) cycle.completion_reason = reason;
+    this.syncReviewCycle(run);
+  }
+
+  private syncReviewCycle(run: LoopRun): void {
+    const cycle = run.review_cycle;
+    if (!cycle) return;
+    const index = run.review_cycles.findIndex((item) => item.cycle === cycle.cycle);
+    if (index >= 0) run.review_cycles[index] = cycle;
+    else run.review_cycles.push(cycle);
   }
 
   private async reconcileMondayReview(run: LoopRun, forced = false, allowRecovery = true): Promise<LoopRun> {
@@ -393,10 +450,15 @@ export class LoopController {
     const identityError = this.pullIdentityError(run, current);
     if (identityError) return await this.block(run, identityError);
     if (current.head_sha !== run.pr.head_sha) {
+      this.finishReviewCycle(run, "superseded", undefined, `PR Head changed from ${run.pr.head_sha} to ${current.head_sha}.`);
       run.pr = { ...current, first_seen_at: run.pr.first_seen_at };
       run.ci = undefined;
       await this.progress(run, "head_changed", `PR Head changed to ${current.head_sha}; old approval and CI are invalid.`, { sha: current.head_sha });
       return await this.transition(run, "waiting_ci", "github", `CI for unexpected new SHA ${current.head_sha}`, "Head changed during review; previous approval is invalid.");
+    }
+    const cycle = run.review_cycle;
+    if (!cycle || cycle.status !== "active" || cycle.pr_number !== run.pr.number || cycle.head_sha !== run.pr.head_sha) {
+      return await this.block(run, "Active Monday review cycle is missing or does not match the tracked PR Head.");
     }
     const evidence = await this.github.getReviewEvidence(run.repo, run.pr.number);
     const monday = run.monday_github_login.toLowerCase();
@@ -405,23 +467,31 @@ export class LoopController {
       .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
     if (approval && (run.ci?.state === "success" || run.ci?.state === "none")) {
       await this.recordReviewProgress(run, approval);
+      this.finishReviewCycle(run, "approved", approval, `Approved on Head ${run.pr.head_sha}.`);
       run.terminal_reason = `Approved by ${approval.author} on current Head ${run.pr.head_sha}`;
       return await this.transition(run, "completed", "none", "nothing; approval is terminal", "Current SHA received a valid Monday APPROVED review. PR remains open and unmerged.");
     }
-    const baseline = new Set(run.review_baseline_comment_ids);
+    const baseline = new Set(cycle.baseline_evidence_ids);
     const newComment = authored.find((item) => !baseline.has(item.id) && this.isChangeEvidence(item, run));
     if (newComment) await this.recordReviewProgress(run, newComment);
-    let newFinding = run.pending_review_finding;
+    let newFinding = cycle.finding;
     if (!newFinding) {
-      newFinding = await this.findAndStoreFinding(run, run.monday, run.latest_finding?.source_message_id ?? 0);
+      newFinding = await this.findAndStoreFinding(run, run.monday, run.latest_finding?.source_message_id ?? 0, {
+        purpose: "review",
+        reviewCycle: cycle.cycle,
+        headSha: cycle.head_sha,
+      });
       if (newFinding) {
+        cycle.finding = newFinding;
         run.pending_review_finding = newFinding;
+        this.syncReviewCycle(run);
         await this.store.writeRun(run);
       }
     }
     if (newComment && newFinding) {
       run.latest_finding = newFinding;
       run.pending_review_finding = undefined;
+      this.finishReviewCycle(run, "revision_requested", newComment, `Revision requested for Head ${cycle.head_sha}.`);
       run.iteration += 1;
       run.pr.expected_previous_sha = run.pr.head_sha;
       run.developer_attempt += 1;
@@ -526,12 +596,17 @@ export class LoopController {
     }
   }
 
-  private async findAndStoreFinding(run: LoopRun, agent: AgentTurnState, afterMessageId: number): Promise<LoopRun["latest_finding"] | undefined> {
+  private async findAndStoreFinding(
+    run: LoopRun,
+    agent: AgentTurnState,
+    afterMessageId: number,
+    binding: { purpose: "initial" | "review"; reviewCycle?: number; headSha?: string },
+  ): Promise<LoopRun["latest_finding"] | undefined> {
     if (!agent.topic_id) return undefined;
     const files = await this.catsco.getAgentFiles(agent.agent_uid, agent.topic_id);
     const candidates = files.filter((file) => file.message_id > Math.max(agent.dispatch_seq ?? 0, afterMessageId) && isZip(file)).sort((a, b) => b.message_id - a.message_id);
     for (const file of candidates) {
-      const version = Math.max(run.latest_finding?.version ?? 0, run.pending_review_finding?.version ?? 0) + 1;
+      const version = Math.max(0, ...run.finding_history.map((item) => item.version), run.latest_finding?.version ?? 0, run.pending_review_finding?.version ?? 0) + 1;
       const destination = await this.store.findingPath(run.run_id, version);
       try {
         const downloaded = await this.catsco.download(file.url, destination, this.config.maxFindingBytes);
@@ -548,8 +623,19 @@ export class LoopController {
           stored_path: destination,
           ...(file.created_at ? { created_at: file.created_at } : {}),
           validated_at: now(),
+          purpose: binding.purpose,
+          ...(binding.reviewCycle ? { review_cycle: binding.reviewCycle } : {}),
+          ...(binding.headSha ? { head_sha: binding.headSha } : {}),
         };
-        await this.progress(run, "finding_validated", `Validated Finding ZIP v${version}.`, { file_id: file.id, sha256: downloaded.sha256, size: downloaded.size });
+        if (!run.finding_history.some((item) => item.id === finding.id)) run.finding_history.push(finding);
+        await this.progress(run, "finding_validated", `Validated Finding ZIP v${version}.`, {
+          file_id: file.id,
+          sha256: downloaded.sha256,
+          size: downloaded.size,
+          purpose: binding.purpose,
+          ...(binding.reviewCycle ? { review_cycle: binding.reviewCycle } : {}),
+          ...(binding.headSha ? { head_sha: binding.headSha } : {}),
+        });
         return finding;
       } catch (error) {
         await this.store.appendEvent(run, { type: "finding_rejected", message: error instanceof Error ? error.message : String(error), data: { file_id: file.id, message_id: file.message_id } });

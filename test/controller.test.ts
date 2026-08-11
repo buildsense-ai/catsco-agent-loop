@@ -81,6 +81,10 @@ test("normal ZIP to PR to CI to current-SHA approval completes without merge", a
   await ctx.controller.tick();
   run = await ctx.store.readRun(run.run_id);
   assert.equal(run.phase, "monday_review");
+  assert.equal(run.schema_version, 2);
+  assert.equal(run.review_cycle?.cycle, 1);
+  assert.equal(run.review_cycle?.head_sha, "abc123");
+  assert.equal(run.review_cycle?.status, "active");
   assert.equal(run.monday.topic_id, mondayTopic, "Monday Topic must be reused");
   run.last_progress_at = new Date(Date.now() - 1_000).toISOString();
   await ctx.store.writeRun(run);
@@ -91,6 +95,8 @@ test("normal ZIP to PR to CI to current-SHA approval completes without merge", a
   assert.equal(run.phase, "completed");
   assert.equal(run.developer.topic_id, developerTopic, "Developer Topic must be reused");
   assert.match(run.terminal_reason!, /Approved/);
+  assert.equal(run.review_cycle?.status, "approved");
+  assert.equal(run.review_cycle?.evidence?.id, "review:1");
   assert.ok(Date.parse(run.last_progress_at) > Date.parse(progressBeforeApproval));
 });
 
@@ -295,7 +301,56 @@ test("Monday review with ZIP only preserves partial delivery and asks only for G
   run = await ctx.store.readRun(run.run_id);
   assert.equal(run.phase, "recovering");
   assert.equal(run.pending_review_finding?.version, 2);
+  assert.equal(run.pending_review_finding?.review_cycle, 1);
+  assert.equal(run.pending_review_finding?.head_sha, "abc123");
+  assert.equal(run.review_cycle?.finding?.id, run.pending_review_finding?.id);
   assert.match(run.waiting_for, /GitHub review\/comment/);
+});
+
+test("a Finding from an old Head is archived and cannot pair with a later review cycle", async () => {
+  const ctx = await setup();
+  let run = await advanceToReview(ctx);
+  const mondayTopic = run.monday.topic_id!;
+
+  ctx.catsco.addFinding(mondayTopic, "finding-head-a.zip");
+  await ctx.controller.reconcile(run.run_id);
+  run = await ctx.store.readRun(run.run_id);
+  const oldFinding = run.review_cycle?.finding;
+  assert.equal(oldFinding?.head_sha, "abc123");
+  assert.equal(run.review_cycle?.status, "active");
+
+  ctx.github.pr!.head_sha = "def456";
+  await ctx.controller.reconcile(run.run_id);
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "waiting_ci");
+  assert.equal(run.review_cycles[0]?.status, "superseded");
+  assert.equal(run.review_cycles[0]?.finding?.id, oldFinding?.id);
+
+  ctx.github.ci = { sha: "def456", state: "success", checks: [{ name: "test", state: "completed", conclusion: "success" }], observed_at: new Date().toISOString() };
+  await ctx.controller.reconcile(run.run_id);
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "monday_review");
+  assert.equal(run.review_cycle?.cycle, 2);
+  assert.equal(run.review_cycle?.head_sha, "def456");
+  assert.equal(run.review_cycle?.finding, undefined);
+  assert.equal(run.pending_review_finding, undefined);
+
+  ctx.github.evidence.push({ id: "issue:new-head", kind: "issue_comment", author: "monday-reviewer", created_at: new Date().toISOString() });
+  await ctx.controller.reconcile(run.run_id);
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "monday_review", "new comment must not pair with the archived old-Head ZIP");
+  assert.equal(run.review_cycle?.finding, undefined);
+  assert.match(run.waiting_for, /Finding ZIP/);
+
+  ctx.catsco.addFinding(mondayTopic, "finding-head-b.zip");
+  await ctx.controller.reconcile(run.run_id);
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "developer_implementing");
+  assert.equal(run.review_cycles[1]?.status, "revision_requested");
+  assert.equal(run.review_cycles[1]?.head_sha, "def456");
+  assert.equal(run.review_cycles[1]?.finding?.head_sha, "def456");
+  assert.equal(run.review_cycles[1]?.evidence?.id, "issue:new-head");
+  assert.equal(run.finding_history.length, 3);
 });
 
 test("crash reconciliation reuses an existing uniquely named Agent Task", async () => {
@@ -363,6 +418,7 @@ test("GitHub auth marker inside Monday tool transcript is not a blocking deliver
 test("missing required Monday reviewer identity blocks GitHub auth without futile recovery", async () => {
   const ctx = await setup();
   let run = await advanceToReview(ctx);
+  ctx.catsco.addFinding(run.monday.topic_id!, "finding-before-auth-restore.zip");
   ctx.catsco.agentReply(run.monday.topic_id!, "LOOP_BLOCKED_GITHUB_AUTH reviewer=monday-reviewer");
   ctx.catsco.finish(run.monday.topic_id!);
   await ctx.controller.tick();
@@ -372,14 +428,19 @@ test("missing required Monday reviewer identity blocks GitHub auth without futil
   assert.match(run.last_error!, /monday-reviewer/);
   const topic = run.monday.topic_id!;
   const priorDispatch = run.monday.dispatch_seq;
-  run.pending_review_finding = run.latest_finding;
-  await ctx.store.writeRun(run);
+  const archivedFindingId = run.pending_review_finding?.id;
+  assert.ok(archivedFindingId);
   run = await ctx.controller.resume(run.run_id);
   assert.equal(run.phase, "monday_review");
   assert.equal(run.monday.topic_id, topic);
   assert.ok(run.monday.dispatch_seq! > priorDispatch!);
   assert.equal(run.monday.github_auth_error, undefined);
   assert.equal(run.pending_review_finding, undefined);
+  assert.equal(run.review_cycles[0]?.status, "superseded");
+  assert.equal(run.review_cycles[0]?.finding?.id, archivedFindingId);
+  assert.equal(run.review_cycle?.cycle, 2);
+  assert.equal(run.review_cycle?.status, "active");
+  assert.ok(run.finding_history.some((item) => item.id === archivedFindingId));
   assert.match(String(ctx.catsco.topics.get(topic)!.messages.at(-1)?.content), /monday-reviewer/);
   ctx.github.evidence.push({ id: "review:restored", kind: "review", author: "monday-reviewer", state: "APPROVED", commit_id: "abc123", created_at: new Date().toISOString() });
   await ctx.controller.tick();
@@ -499,12 +560,18 @@ test("legacy run.json reads are pure and explicit startup migration persists dis
   delete legacy.last_activity_at;
   delete legacy.activity_state;
   delete legacy.review_progress_evidence_ids;
+  legacy.schema_version = 1;
+  delete legacy.finding_history;
+  delete legacy.review_cycles;
+  delete legacy.review_cycle;
   const persistedBeforeRead = `${JSON.stringify(legacy, null, 2)}\n`;
   await writeFile(path, persistedBeforeRead);
   const normalized = await ctx.store.readRun(run.run_id);
   assert.equal(normalized.last_activity_at, normalized.last_progress_at);
   assert.equal(normalized.activity_state, "quiet");
   assert.deepEqual(normalized.review_progress_evidence_ids, []);
+  assert.deepEqual(normalized.finding_history, []);
+  assert.deepEqual(normalized.review_cycles, []);
   assert.equal(await readFile(path, "utf8"), persistedBeforeRead);
 
   assert.deepEqual(await ctx.store.migrateLegacyRuns(), [run.run_id]);
@@ -513,7 +580,37 @@ test("legacy run.json reads are pure and explicit startup migration persists dis
   assert.ok(persisted.last_progress_at);
   assert.ok(persisted.activity_state);
   assert.ok(Array.isArray(persisted.review_progress_evidence_ids));
+  assert.equal(persisted.schema_version, 2);
+  assert.ok(Array.isArray(persisted.finding_history));
+  assert.ok(Array.isArray(persisted.review_cycles));
   assert.deepEqual(await ctx.store.migrateLegacyRuns(), [], "migration must be idempotent");
+});
+
+test("legacy pending review Finding is migrated into its current Head cycle", async () => {
+  const ctx = await setup();
+  let run = await advanceToReview(ctx);
+  ctx.catsco.addFinding(run.monday.topic_id!, "legacy-pending.zip");
+  await ctx.controller.reconcile(run.run_id);
+  run = await ctx.store.readRun(run.run_id);
+  const path = join(ctx.config.stateDir, run.run_id, "run.json");
+  const legacy = JSON.parse(await readFile(path, "utf8")) as Record<string, any>;
+  legacy.schema_version = 1;
+  delete legacy.finding_history;
+  delete legacy.review_cycles;
+  delete legacy.review_cycle;
+  delete legacy.pending_review_finding.purpose;
+  delete legacy.pending_review_finding.review_cycle;
+  delete legacy.pending_review_finding.head_sha;
+  await writeFile(path, `${JSON.stringify(legacy, null, 2)}\n`);
+
+  assert.deepEqual(await ctx.store.migrateLegacyRuns(), [run.run_id]);
+  const migrated = await ctx.store.readRun(run.run_id);
+  assert.equal(migrated.schema_version, 2);
+  assert.equal(migrated.review_cycle?.status, "active");
+  assert.equal(migrated.review_cycle?.head_sha, "abc123");
+  assert.equal(migrated.review_cycle?.finding?.review_cycle, 1);
+  assert.equal(migrated.review_cycle?.finding?.head_sha, "abc123");
+  assert.equal(migrated.finding_history.at(-1)?.id, migrated.pending_review_finding?.id);
 });
 
 test("manual reconcile and scheduler serialize per Run", async () => {

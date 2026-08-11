@@ -51,13 +51,15 @@ loopctl cancel --run run_...
 - The PR author must match the configured Developer GitHub login and the head repository must be the controlled repository.
 - CI failure is returned to Developer; Controller does not rerun workflows.
 - Continue requires both Monday GitHub feedback and a new Finding ZIP.
+- Each Monday review attempt has a durable Review Cycle bound to one PR number and exact Head SHA. Its baseline GitHub evidence, Finding ZIP, and review/comment are scoped to that cycle only.
+- Superseded Review Cycles and their ZIPs remain in `review_cycles` and `finding_history` for operator/Artifact disclosure; they can never pair with evidence from a later Head.
 - Completion requires Monday `APPROVED` on the current Head SHA after CI success/no-check confirmation.
 - New commits invalidate prior CI and approvals.
 - Controller never merges, closes, or comments on the PR.
 
 State is stored as atomic `run.json`, append-only `events.jsonl`, `request.md`, and validated ZIP copies below the configured run directory. On restart the scheduler reconciles external side effects before any resend.
 Episode state is a timestamped observation; `active_actor` is authoritative for who the Controller is currently driving.
-Before the HTTP API and scheduler start, the Controller performs an idempotent migration that adds missing timing disclosure fields to legacy `run.json` files. Runtime GET/read paths remain side-effect free.
+Before the HTTP API and scheduler start, the Controller performs an idempotent migration that adds missing timing and Review Cycle disclosure fields to legacy `run.json` files. Runtime GET/read paths remain side-effect free.
 
 ## Run timing
 

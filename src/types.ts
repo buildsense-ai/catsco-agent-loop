@@ -52,6 +52,25 @@ export interface FindingRecord {
   stored_path: string;
   created_at?: string;
   validated_at: string;
+  purpose?: "initial" | "review";
+  review_cycle?: number;
+  head_sha?: string;
+}
+
+export type ReviewCycleStatus = "active" | "revision_requested" | "approved" | "superseded";
+
+export interface ReviewCycle {
+  cycle: number;
+  pr_number: number;
+  head_sha: string;
+  requested_at: string;
+  dispatch_seq?: number;
+  baseline_evidence_ids: string[];
+  status: ReviewCycleStatus;
+  finding?: FindingRecord;
+  evidence?: ReviewEvidence;
+  completed_at?: string;
+  completion_reason?: string;
 }
 
 export interface PullRequestState {
@@ -90,7 +109,7 @@ export interface DispatchReceipt {
 export type ActivityState = "active" | "quiet" | "suspected_stall";
 
 export interface LoopRun {
-  schema_version: 1;
+  schema_version: 1 | 2;
   run_id: string;
   phase: RunPhase;
   resume_phase?: Exclude<RunPhase, "recovering">;
@@ -111,7 +130,10 @@ export interface LoopRun {
   pr?: PullRequestState;
   ci?: CiSummary;
   latest_finding?: FindingRecord;
+  finding_history: FindingRecord[];
   pending_review_finding?: FindingRecord;
+  review_cycle?: ReviewCycle;
+  review_cycles: ReviewCycle[];
   review_requested_at?: string;
   review_dispatch_seq?: number;
   review_baseline_comment_ids: string[];
