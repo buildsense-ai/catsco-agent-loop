@@ -14,5 +14,7 @@
   "githubPollMs": 15000,
   "idlePollMs": 30000,
   "noChecksGraceMs": 30000,
-  "stageTimeoutMs": 2700000
+  "stageTimeoutMs": 5400000,
+  "activityStallMs": 1200000,
+  "runAbsoluteTimeoutMs": 14400000
 }

@@ -9,6 +9,11 @@ function int(value: unknown, fallback: number): number {
   return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
 }
 
+function positiveInt(value: unknown, fallback: number): number {
+  const parsed = int(value, fallback);
+  return parsed > 0 ? parsed : fallback;
+}
+
 function text(value: unknown, fallback = ""): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
@@ -51,8 +56,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControllerConf
     githubPollMs: int(env.CATSLOOP_GITHUB_POLL_MS ?? file.githubPollMs, 15_000),
     idlePollMs: int(env.CATSLOOP_IDLE_POLL_MS ?? file.idlePollMs, 30_000),
     noChecksGraceMs: int(env.CATSLOOP_NO_CHECKS_GRACE_MS ?? file.noChecksGraceMs, 30_000),
-    stageTimeoutMs: int(env.CATSLOOP_STAGE_TIMEOUT_MS ?? file.stageTimeoutMs, 45 * 60_000),
-    maxFindingBytes: int(env.CATSLOOP_MAX_FINDING_BYTES ?? file.maxFindingBytes, 100 * 1024 * 1024),
+    stageTimeoutMs: positiveInt(env.CATSLOOP_STAGE_TIMEOUT_MS ?? file.stageTimeoutMs, 90 * 60_000),
+    activityStallMs: positiveInt(env.CATSLOOP_ACTIVITY_STALL_MS ?? file.activityStallMs, 20 * 60_000),
+    runAbsoluteTimeoutMs: positiveInt(env.CATSLOOP_RUN_ABSOLUTE_TIMEOUT_MS ?? file.runAbsoluteTimeoutMs, 4 * 60 * 60_000),
+    maxFindingBytes: positiveInt(env.CATSLOOP_MAX_FINDING_BYTES ?? file.maxFindingBytes, 100 * 1024 * 1024),
     ...(catscoToken ? { catscoToken } : {}),
     ...(catscoAccount ? { catscoAccount } : {}),
     ...(catscoPassword ? { catscoPassword } : {}),

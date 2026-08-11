@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,7 +30,8 @@ async function setup() {
     catscoBaseUrl: "https://cats.example", controllerUid: 363, mondayAgentUid: 553, developerAgentUid: 559,
     mondayGithubLogin: "monday-reviewer", developerGithubLogin: "developer", stateDir: join(root, "runs"),
     host: "127.0.0.1", port: 0, operatorToken: "secret", maxActiveRuns: 1, catscoPollMs: 5,
-    githubPollMs: 5, idlePollMs: 5, noChecksGraceMs: 0, stageTimeoutMs: 45 * 60_000, maxFindingBytes: 10_000_000,
+    githubPollMs: 5, idlePollMs: 5, noChecksGraceMs: 0, stageTimeoutMs: 90 * 60_000,
+    activityStallMs: 20 * 60_000, runAbsoluteTimeoutMs: 4 * 60 * 60_000, maxFindingBytes: 10_000_000,
   };
   const store = new RunStore(config.stateDir);
   const catsco = new FakeCatsco();
@@ -81,12 +82,16 @@ test("normal ZIP to PR to CI to current-SHA approval completes without merge", a
   run = await ctx.store.readRun(run.run_id);
   assert.equal(run.phase, "monday_review");
   assert.equal(run.monday.topic_id, mondayTopic, "Monday Topic must be reused");
+  run.last_progress_at = new Date(Date.now() - 1_000).toISOString();
+  await ctx.store.writeRun(run);
+  const progressBeforeApproval = run.last_progress_at;
   ctx.github.evidence.push({ id: "review:1", kind: "review", author: "monday-reviewer", state: "APPROVED", commit_id: "abc123", created_at: new Date().toISOString() });
   await ctx.controller.tick();
   run = await ctx.store.readRun(run.run_id);
   assert.equal(run.phase, "completed");
   assert.equal(run.developer.topic_id, developerTopic, "Developer Topic must be reused");
   assert.match(run.terminal_reason!, /Approved/);
+  assert.ok(Date.parse(run.last_progress_at) > Date.parse(progressBeforeApproval));
 });
 
 test("old approval is invalid after a new Head SHA", async () => {
@@ -139,13 +144,19 @@ test("manual message pauses controlled run and resume preserves Topic", async ()
   run = await ctx.store.readRun(run.run_id);
   assert.equal(run.phase, "blocked");
   assert.equal(run.paused_for_manual_message?.message_id, id);
+  const createdAt = run.created_at;
   const staleProgress = new Date(Date.now() - ctx.config.stageTimeoutMs - 1).toISOString();
+  const staleActivity = new Date(Date.now() - ctx.config.activityStallMs - 1).toISOString();
   run.last_progress_at = staleProgress;
+  run.last_activity_at = staleActivity;
   await ctx.store.writeRun(run);
   run = await ctx.controller.resume(run.run_id);
   assert.equal(run.phase, "monday_finding");
   assert.equal(run.monday.topic_id, topic.messages[0]?.topic_id);
   assert.ok(Date.parse(run.last_progress_at) > Date.parse(staleProgress));
+  assert.ok(Date.parse(run.last_activity_at) > Date.parse(staleActivity));
+  assert.equal(run.last_activity_at, run.last_progress_at);
+  assert.equal(run.created_at, createdAt);
   await ctx.controller.tick();
   run = await ctx.store.readRun(run.run_id);
   assert.notEqual(run.phase, "blocked");
@@ -198,6 +209,8 @@ test("Developer terminal Episode without PR schedules recovery on the same Topic
   const ctx = await setup();
   let run = await advanceToDeveloper(ctx);
   const topic = run.developer.topic_id!;
+  run.last_progress_at = new Date(Date.now() - ctx.config.stageTimeoutMs - 1).toISOString();
+  await ctx.store.writeRun(run);
   ctx.catsco.agentReply(topic, "done without PR");
   ctx.catsco.finish(topic);
   await ctx.controller.tick();
@@ -211,6 +224,65 @@ test("Developer terminal Episode without PR schedules recovery on the same Topic
   assert.equal(run.phase, "developer_implementing");
   assert.equal(run.developer.topic_id, topic);
   assert.equal(ctx.catsco.topics.get(topic)!.messages.length, messageCount + 1);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "developer_implementing");
+});
+
+test("recovery backoff still observes Agent activity without resending", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  const topic = run.developer.topic_id!;
+  ctx.catsco.agentReply(topic, "done without PR");
+  ctx.catsco.finish(topic);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "recovering");
+  const retryAt = run.next_retry_at;
+  const controllerMessages = ctx.catsco.topics.get(topic)!.messages.filter((message) => message.from_uid === 363).length;
+  run.last_activity_at = "2000-01-01T00:00:00.000Z";
+  await ctx.store.writeRun(run);
+
+  ctx.catsco.agentReply(topic, "late background progress");
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+
+  assert.equal(run.phase, "recovering");
+  assert.equal(run.next_retry_at, retryAt);
+  assert.notEqual(run.last_activity_at, "2000-01-01T00:00:00.000Z");
+  assert.equal(ctx.catsco.topics.get(topic)!.messages.filter((message) => message.from_uid === 363).length, controllerMessages);
+});
+
+test("recovery reconciles an externally created PR before sending another prompt", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  const topic = run.developer.topic_id!;
+  ctx.catsco.agentReply(topic, "done without PR");
+  ctx.catsco.finish(topic);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "recovering");
+  const controllerMessages = ctx.catsco.topics.get(topic)!.messages.filter((message) => message.from_uid === 363).length;
+  ctx.github.pr = {
+    number: 42,
+    url: "https://github.com/acme/widget/pull/42",
+    state: "OPEN",
+    base_ref: "main",
+    head_ref: run.branch,
+    head_sha: "abc123",
+    author_login: "developer",
+    head_repository: "acme/widget",
+    head_repository_owner: "acme",
+    first_seen_at: new Date().toISOString(),
+  };
+
+  await ctx.controller.reconcile(run.run_id);
+  run = await ctx.store.readRun(run.run_id);
+
+  assert.equal(run.phase, "waiting_ci");
+  assert.equal(run.pr?.head_sha, "abc123");
+  assert.equal(run.recovery_attempt, 0);
+  assert.equal(ctx.catsco.topics.get(topic)!.messages.filter((message) => message.from_uid === 363).length, controllerMessages);
 });
 
 test("Monday review with ZIP only preserves partial delivery and asks only for GitHub evidence", async () => {
@@ -255,6 +327,19 @@ test("protocol names inside ordinary tool output do not misclassify a direct Dev
   let run = await advanceToDeveloper(ctx);
   const topic = run.developer.topic_id!;
   ctx.catsco.agentReply(topic, "Command completed: README says a strict execute_attempt worker requires LOOP_WORKTREE_CONTRACT_V1 and workspaceLease.");
+  ctx.catsco.finish(topic);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "recovering");
+  assert.equal(run.developer.protocol_error, undefined);
+});
+
+test("strict worker refusal text inside a structured tool result is not treated as a Developer refusal", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  const topic = run.developer.topic_id!;
+  const text = "Missing LOOP_WORKTREE_CONTRACT_V1 and workspaceLease; cannot create or push the PR.";
+  ctx.catsco.agentReply(topic, text, [{ type: "tool_result", tool_use_id: "call_read", content: text }]);
   ctx.catsco.finish(topic);
   await ctx.controller.tick();
   run = await ctx.store.readRun(run.run_id);
@@ -321,15 +406,114 @@ test("recovery message keys remain unique after partial mechanical progress rese
   assert.equal(new Set(controllerMessages.map((message) => message.client_msg_id)).size, controllerMessages.length);
 });
 
-test("global no-progress timeout blocks a still-running Episode", async () => {
+test("running Episode is not blocked by mechanical timeout and inactivity only reports suspected_stall", async () => {
   const ctx = await setup();
   let run = await advanceToDeveloper(ctx);
+  const topicId = run.developer.topic_id!;
+  const episode = { topic_id: topicId, run_id: "episode_running", state: "running", updated_at: "2026-08-11T00:00:00.000Z" };
+  ctx.catsco.topics.get(topicId)!.episode = episode;
+  run.developer.episode = episode;
+  run.developer.episode_started = true;
   run.last_progress_at = new Date(Date.now() - ctx.config.stageTimeoutMs - 1).toISOString();
+  run.last_activity_at = new Date(Date.now() - ctx.config.activityStallMs - 1).toISOString();
+  const messageCount = ctx.catsco.topics.get(topicId)!.messages.length;
+  await ctx.store.writeRun(run);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "developer_implementing");
+  assert.equal(run.activity_state, "suspected_stall");
+  assert.equal(run.recovery_attempt, 0);
+  assert.equal(ctx.catsco.topics.get(topicId)!.messages.length, messageCount);
+});
+
+test("controlled-Agent message and Episode changes advance activity only once per fact", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  const topicId = run.developer.topic_id!;
+  const old = "2000-01-01T00:00:00.000Z";
+  const mechanicalProgress = run.last_progress_at;
+  run.last_activity_at = old;
+  await ctx.store.writeRun(run);
+  ctx.catsco.agentReply(topicId, "working");
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  const messageActivity = run.last_activity_at;
+  assert.notEqual(messageActivity, old);
+  assert.equal(run.last_progress_at, mechanicalProgress);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.last_activity_at, messageActivity);
+
+  run.last_activity_at = old;
+  await ctx.store.writeRun(run);
+  ctx.catsco.topics.get(topicId)!.episode = { topic_id: topicId, run_id: "episode_1", state: "running", updated_at: "2026-08-11T00:00:00.000Z" };
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.notEqual(run.last_activity_at, old);
+  assert.equal(run.activity_state, "active");
+
+  run.last_activity_at = old;
+  await ctx.store.writeRun(run);
+  ctx.catsco.topics.get(topicId)!.episode = { topic_id: topicId, run_id: "episode_1", state: "waiting", updated_at: "2026-08-11T00:01:00.000Z" };
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.notEqual(run.last_activity_at, old);
+  assert.equal(run.activity_state, "quiet");
+});
+
+test("absolute Run limit blocks a running Episode", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  const topicId = run.developer.topic_id!;
+  const episode = { topic_id: topicId, run_id: "episode_running", state: "running", updated_at: new Date().toISOString() };
+  ctx.catsco.topics.get(topicId)!.episode = episode;
+  run.developer.episode = episode;
+  run.developer.episode_started = true;
+  run.created_at = new Date(Date.now() - ctx.config.runAbsoluteTimeoutMs - 1).toISOString();
   await ctx.store.writeRun(run);
   await ctx.controller.tick();
   run = await ctx.store.readRun(run.run_id);
   assert.equal(run.phase, "blocked");
-  assert.match(run.terminal_reason!, /No mechanical progress/);
+  assert.match(run.terminal_reason!, /absolute limit/);
+});
+
+test("absolute Run limit sweeps queued Runs outside the active slot", async () => {
+  const ctx = await setup();
+  const active = await ctx.controller.createRun({ request: "active", repo: "acme/widget" });
+  await ctx.controller.tick();
+  assert.equal((await ctx.store.readRun(active.run_id)).phase, "monday_finding");
+  let queued = await ctx.controller.createRun({ request: "queued", repo: "acme/widget" });
+  queued.created_at = new Date(Date.now() - ctx.config.runAbsoluteTimeoutMs - 1).toISOString();
+  await ctx.store.writeRun(queued);
+  await ctx.controller.tick();
+  queued = await ctx.store.readRun(queued.run_id);
+  assert.equal(queued.phase, "blocked");
+  assert.match(queued.terminal_reason!, /absolute limit/);
+});
+
+test("legacy run.json reads are pure and explicit startup migration persists disclosure fields", async () => {
+  const ctx = await setup();
+  const run = await ctx.controller.createRun({ request: "work", repo: "acme/widget" });
+  const path = join(ctx.config.stateDir, run.run_id, "run.json");
+  const legacy = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  delete legacy.last_activity_at;
+  delete legacy.activity_state;
+  delete legacy.review_progress_evidence_ids;
+  const persistedBeforeRead = `${JSON.stringify(legacy, null, 2)}\n`;
+  await writeFile(path, persistedBeforeRead);
+  const normalized = await ctx.store.readRun(run.run_id);
+  assert.equal(normalized.last_activity_at, normalized.last_progress_at);
+  assert.equal(normalized.activity_state, "quiet");
+  assert.deepEqual(normalized.review_progress_evidence_ids, []);
+  assert.equal(await readFile(path, "utf8"), persistedBeforeRead);
+
+  assert.deepEqual(await ctx.store.migrateLegacyRuns(), [run.run_id]);
+  const persisted = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  assert.ok(persisted.last_activity_at);
+  assert.ok(persisted.last_progress_at);
+  assert.ok(persisted.activity_state);
+  assert.ok(Array.isArray(persisted.review_progress_evidence_ids));
+  assert.deepEqual(await ctx.store.migrateLegacyRuns(), [], "migration must be idempotent");
 });
 
 test("manual reconcile and scheduler serialize per Run", async () => {

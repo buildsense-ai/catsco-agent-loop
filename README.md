@@ -57,6 +57,19 @@ loopctl cancel --run run_...
 
 State is stored as atomic `run.json`, append-only `events.jsonl`, `request.md`, and validated ZIP copies below the configured run directory. On restart the scheduler reconciles external side effects before any resend.
 Episode state is a timestamped observation; `active_actor` is authoritative for who the Controller is currently driving.
+Before the HTTP API and scheduler start, the Controller performs an idempotent migration that adds missing timing disclosure fields to legacy `run.json` files. Runtime GET/read paths remain side-effect free.
+
+## Run timing
+
+Every `run.json`, `GET /api/runs`, and `GET /api/runs/:id` discloses `activity_state`, `last_activity_at`, and `last_progress_at`.
+
+- `last_activity_at` advances only for a new controlled-Agent message or a change to the observed Episode `run_id`, `state`, or `updated_at`. Polling, Controller messages, phase changes, and GitHub checks are not Agent activity.
+- `activity_state` is `active` for a running Episode with recent activity, `quiet` for normal non-running/non-Agent waits, and `suspected_stall` after 20 minutes without qualifying activity while waiting for an Agent. A suspected stall is disclosure only: it does not resend, restart, or create a Topic.
+- `last_progress_at` advances only for mechanical delivery evidence such as a validated Finding ZIP, an open PR or new Head SHA, terminal CI evidence, or a new review/comment/approval.
+- The mechanical stage timeout defaults to 90 minutes. A running Episode is not blocked solely because that window elapsed, and a terminal Episode missing delivery retains the same-Topic 1/3/8/15-minute recovery schedule.
+- The absolute Run limit defaults to four hours from immutable `created_at`, includes queued time, and can block as the final fallback. Resume resets both activity and mechanical windows but does not reset this absolute anchor.
+
+The timing values are configurable with `stageTimeoutMs`, `activityStallMs`, and `runAbsoluteTimeoutMs`, or the corresponding `CATSLOOP_STAGE_TIMEOUT_MS`, `CATSLOOP_ACTIVITY_STALL_MS`, and `CATSLOOP_RUN_ABSOLUTE_TIMEOUT_MS` environment variables.
 
 ## API
 

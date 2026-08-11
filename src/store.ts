@@ -1,5 +1,6 @@
 import { appendFile, mkdir, open, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { computeActivityState, DEFAULT_ACTIVITY_STALL_MS } from "./activity.js";
 import type { LoopRun, RunEvent, RunPhase } from "./types.js";
 
 const TERMINAL = new Set<RunPhase>([
@@ -11,7 +12,7 @@ const TERMINAL = new Set<RunPhase>([
 ]);
 
 export class RunStore {
-  constructor(readonly root: string) {}
+  constructor(readonly root: string, readonly activityStallMs = DEFAULT_ACTIVITY_STALL_MS) {}
 
   runDir(runId: string): string {
     if (!/^run_[a-z0-9_-]+$/i.test(runId)) throw new Error("Invalid run id");
@@ -45,7 +46,57 @@ export class RunStore {
   }
 
   async readRun(runId: string): Promise<LoopRun> {
-    return JSON.parse(await readFile(join(this.runDir(runId), "run.json"), "utf8")) as LoopRun;
+    const run = JSON.parse(await readFile(join(this.runDir(runId), "run.json"), "utf8")) as LoopRun;
+    if (!run.last_activity_at) {
+      run.last_activity_at = run.last_progress_at || run.updated_at || run.created_at;
+    }
+    run.activity_state = computeActivityState(run, Date.now(), this.activityStallMs);
+    if (!run.review_progress_evidence_ids) {
+      run.review_progress_evidence_ids = [];
+    }
+    return run;
+  }
+
+  /**
+   * Persist fields introduced after the original run schema was deployed.
+   * This must run during Controller initialization, before the API and
+   * scheduler start, so no stale read snapshot can race a live Run update.
+   */
+  async migrateLegacyRuns(): Promise<string[]> {
+    await mkdir(this.root, { recursive: true, mode: 0o700 });
+    const entries = await readdir(this.root, { withFileTypes: true });
+    const migrated: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith("run_")) continue;
+      try {
+        const path = join(this.runDir(entry.name), "run.json");
+        const run = JSON.parse(await readFile(path, "utf8")) as LoopRun;
+        let changed = false;
+        if (!run.last_progress_at) {
+          run.last_progress_at = run.updated_at || run.created_at;
+          changed = true;
+        }
+        if (!run.last_activity_at) {
+          run.last_activity_at = run.last_progress_at;
+          changed = true;
+        }
+        if (!run.activity_state) {
+          run.activity_state = computeActivityState(run, Date.now(), this.activityStallMs);
+          changed = true;
+        }
+        if (!run.review_progress_evidence_ids) {
+          run.review_progress_evidence_ids = [];
+          changed = true;
+        }
+        if (!changed) continue;
+        await this.writeRun(run);
+        migrated.push(run.run_id);
+      } catch {
+        // Preserve the existing tolerant store behavior: one malformed Run
+        // must not hide healthy Runs or prevent the operator API from starting.
+      }
+    }
+    return migrated;
   }
 
   async listRuns(): Promise<LoopRun[]> {

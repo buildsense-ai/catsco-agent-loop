@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { basename } from "node:path";
+import { activityAgent, computeActivityState } from "./activity.js";
 import { CatscoAuthError, GithubAuthError, LoopError } from "./errors.js";
 import type { ICatscoClient } from "./catsco-client.js";
 import type { IGithubClient } from "./github-client.js";
@@ -55,6 +56,7 @@ export class LoopController {
 
   async initialize(): Promise<void> {
     await mkdir(this.config.stateDir, { recursive: true, mode: 0o700 });
+    await this.store.migrateLegacyRuns();
     try {
       await this.catsco.validateSession();
     } catch (error) {
@@ -119,10 +121,13 @@ export class LoopController {
       monday: { agent_uid: input.monday_agent_uid ?? this.config.mondayAgentUid, episode_started: false },
       developer: { agent_uid: input.developer_agent_uid ?? this.config.developerAgentUid, episode_started: false },
       review_baseline_comment_ids: [],
+      review_progress_evidence_ids: [],
       sent_message_ids: [],
       receipts: {},
       created_at: created,
       updated_at: created,
+      activity_state: "quiet",
+      last_activity_at: created,
       last_progress_at: created,
       cancel_requested: false,
     };
@@ -153,10 +158,11 @@ export class LoopController {
       run.paused_for_manual_message = undefined;
       run.next_retry_at = undefined;
       run.recovery_attempt = 0;
-      // An explicit operator resume starts a fresh recovery window. Without
-      // this, an old blocked Run can immediately trip the global stage timeout
-      // before the resumed Agent Episode has a chance to start.
-      run.last_progress_at = now();
+      // An explicit operator resume starts fresh activity and mechanical
+      // waiting windows while preserving created_at as the absolute-cap anchor.
+      const resumedAt = now();
+      run.last_activity_at = resumedAt;
+      run.last_progress_at = resumedAt;
       const phase = run.resume_phase ?? this.inferResumePhase(run);
       if (reviewerAuthBlocked && phase === "monday_review" && run.monday.topic_id) {
         run.monday.github_auth_error = undefined;
@@ -189,9 +195,11 @@ export class LoopController {
     this.ticking = true;
     try {
       const runs = await this.store.listNonTerminal();
+      const expired = runs.filter((run) => this.absoluteTimeoutReached(run));
       const active = runs.filter((run) => run.phase !== "queued").slice(0, this.config.maxActiveRuns);
       const available = Math.max(0, this.config.maxActiveRuns - active.length);
-      const selected = [...active, ...runs.filter((run) => run.phase === "queued").slice(0, available)];
+      const queued = runs.filter((run) => run.phase === "queued" && !this.absoluteTimeoutReached(run)).slice(0, available);
+      const selected = [...new Map([...expired, ...active, ...queued].map((run) => [run.run_id, run])).values()];
       await Promise.all(selected.map(async (run) => await this.withRunLock(
         run.run_id,
         async () => await this.process(await this.store.readRun(run.run_id), false),
@@ -204,9 +212,18 @@ export class LoopController {
   private async process(run: LoopRun, forced: boolean): Promise<LoopRun> {
     try {
       if (run.cancel_requested) return await this.transition(run, "cancelled", "none", "cancelled by operator", "Run cancelled. Sessions and GitHub resources were preserved.");
-      if (!forced && run.next_retry_at && Date.parse(run.next_retry_at) > Date.now()) return run;
-      if (run.phase !== "queued" && Date.now() - Date.parse(run.last_progress_at) >= this.config.stageTimeoutMs) {
-        return await this.block(run, `No mechanical progress for ${Math.round(this.config.stageTimeoutMs / 60_000)} minutes while waiting for ${run.waiting_for}.`);
+      if (!isTerminalPhase(run.phase) && this.absoluteTimeoutReached(run)) {
+        return await this.block(run, `Run exceeded the absolute limit of ${Math.round(this.config.runAbsoluteTimeoutMs / 60_000)} minutes.`);
+      }
+      if (!forced && run.next_retry_at && Date.parse(run.next_retry_at) > Date.now()) {
+        if (await this.detectManualMessage(run)) {
+          this.rememberResumePhase(run);
+          return await this.transition(run, "blocked", "none", "manual message detected", "A non-Controller human message entered a controlled Topic; Run paused to prevent double driving.");
+        }
+        const waitingAgent = activityAgent(run);
+        if (waitingAgent) await this.refreshAgent(run, waitingAgent);
+        await this.updateActivityState(run);
+        return run;
       }
       if (!this.validatedRepos.has(run.repo)) {
         await this.github.validate(run.repo);
@@ -215,6 +232,12 @@ export class LoopController {
       if (await this.detectManualMessage(run)) {
         this.rememberResumePhase(run);
         return await this.transition(run, "blocked", "none", "manual message detected", "A non-Controller human message entered a controlled Topic; Run paused to prevent double driving.");
+      }
+      const agent = activityAgent(run);
+      if (agent) await this.refreshAgent(run, agent);
+      await this.updateActivityState(run);
+      if (run.phase !== "queued" && this.mechanicalTimeoutReached(run) && this.mechanicalTimeoutCanBlock(run)) {
+        return await this.block(run, `No mechanical progress for ${Math.round(this.config.stageTimeoutMs / 60_000)} minutes while waiting for ${run.waiting_for}.`);
       }
       if (run.pr && run.developer.protocol_error) {
         run.developer.protocol_error = undefined;
@@ -264,8 +287,7 @@ export class LoopController {
     return await this.transition(run, "monday_finding", "monday", "validated Finding ZIP", "Monday Agent Task created and initial finding request sent.");
   }
 
-  private async reconcileMondayFinding(run: LoopRun): Promise<LoopRun> {
-    await this.refreshAgent(run, run.monday);
+  private async reconcileMondayFinding(run: LoopRun, allowRecovery = true): Promise<LoopRun> {
     const finding = await this.findAndStoreFinding(run, run.monday, run.latest_finding?.source_message_id ?? 0);
     if (finding) {
       run.latest_finding = finding;
@@ -286,11 +308,14 @@ export class LoopController {
       });
       return await this.transition(run, "developer_implementing", "developer", `open PR on ${run.branch}`, "Finding ZIP validated and handed to Developer in a dedicated Agent Task.");
     }
-    return await this.recoverIfTerminal(run, run.monday, "Monday", "a downloadable ZIP containing FINDING.md and manifest.json");
+    const missing = "a downloadable ZIP containing FINDING.md and manifest.json";
+    if (allowRecovery) return await this.recoverIfTerminal(run, run.monday, "Monday", missing);
+    run.waiting_for = missing;
+    await this.store.writeRun(run);
+    return run;
   }
 
-  private async reconcileDeveloper(run: LoopRun, forced = false): Promise<LoopRun> {
-    await this.refreshAgent(run, run.developer);
+  private async reconcileDeveloper(run: LoopRun, forced = false, allowRecovery = true): Promise<LoopRun> {
     if (run.developer.protocol_error && run.developer.episode_started && run.developer.episode && EPISODE_TERMINAL.has(run.developer.episode.state)) {
       return await this.block(run, run.developer.protocol_error);
     }
@@ -311,7 +336,10 @@ export class LoopController {
       return await this.transition(run, "waiting_ci", "github", `CI for ${pull.head_sha}`, "Developer GitHub delivery verified mechanically.");
     }
     const missing = run.pr ? `a new Head SHA on existing PR #${run.pr.number}` : `an open PR from ${run.branch} to ${run.base_branch}`;
-    return await this.recoverIfTerminal(run, run.developer, "Developer", missing);
+    if (allowRecovery) return await this.recoverIfTerminal(run, run.developer, "Developer", missing);
+    run.waiting_for = missing;
+    await this.store.writeRun(run);
+    return run;
   }
 
   private async reconcileCi(run: LoopRun, forced = false): Promise<LoopRun> {
@@ -356,9 +384,8 @@ export class LoopController {
     return await this.transition(run, "monday_review", "monday", "current-SHA approval or comment plus new Finding ZIP", `CI ${run.ci.state}; review request sent to the original Monday Topic.`);
   }
 
-  private async reconcileMondayReview(run: LoopRun, forced = false): Promise<LoopRun> {
+  private async reconcileMondayReview(run: LoopRun, forced = false, allowRecovery = true): Promise<LoopRun> {
     if (!run.pr) return await this.block(run, "Monday review phase has no tracked PR.");
-    await this.refreshAgent(run, run.monday);
     const terminalEpisode = Boolean(run.monday.episode_started && run.monday.episode && EPISODE_TERMINAL.has(run.monday.episode.state));
     if (!await this.beginGithubPoll(run, forced || terminalEpisode || Boolean(run.monday.github_auth_error))) return run;
     const current = await this.github.findPullRequest(run.repo, run.branch, run.base_branch);
@@ -368,6 +395,7 @@ export class LoopController {
     if (current.head_sha !== run.pr.head_sha) {
       run.pr = { ...current, first_seen_at: run.pr.first_seen_at };
       run.ci = undefined;
+      await this.progress(run, "head_changed", `PR Head changed to ${current.head_sha}; old approval and CI are invalid.`, { sha: current.head_sha });
       return await this.transition(run, "waiting_ci", "github", `CI for unexpected new SHA ${current.head_sha}`, "Head changed during review; previous approval is invalid.");
     }
     const evidence = await this.github.getReviewEvidence(run.repo, run.pr.number);
@@ -376,11 +404,13 @@ export class LoopController {
     const approval = authored.filter((item) => item.kind === "review" && item.state?.toUpperCase() === "APPROVED" && item.commit_id === run.pr!.head_sha)
       .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
     if (approval && (run.ci?.state === "success" || run.ci?.state === "none")) {
+      await this.recordReviewProgress(run, approval);
       run.terminal_reason = `Approved by ${approval.author} on current Head ${run.pr.head_sha}`;
       return await this.transition(run, "completed", "none", "nothing; approval is terminal", "Current SHA received a valid Monday APPROVED review. PR remains open and unmerged.");
     }
     const baseline = new Set(run.review_baseline_comment_ids);
     const newComment = authored.find((item) => !baseline.has(item.id) && this.isChangeEvidence(item, run));
+    if (newComment) await this.recordReviewProgress(run, newComment);
     let newFinding = run.pending_review_finding;
     if (!newFinding) {
       newFinding = await this.findAndStoreFinding(run, run.monday, run.latest_finding?.source_message_id ?? 0);
@@ -407,7 +437,16 @@ export class LoopController {
       return await this.transition(run, "blocked_github_auth", "none", `GitHub reviewer identity ${run.monday_github_login}`, run.monday.github_auth_error);
     }
     const missing = newComment ? "a new validated Finding ZIP" : newFinding ? "a Monday GitHub review/comment on the current PR Head" : "either current-SHA APPROVED, or both a GitHub review/comment and new Finding ZIP";
-    return await this.recoverIfTerminal(run, run.monday, "Monday", missing);
+    if (allowRecovery) return await this.recoverIfTerminal(run, run.monday, "Monday", missing);
+    run.waiting_for = missing;
+    await this.store.writeRun(run);
+    return run;
+  }
+
+  private async recordReviewProgress(run: LoopRun, item: ReviewEvidence): Promise<void> {
+    if (run.review_progress_evidence_ids.includes(item.id)) return;
+    run.review_progress_evidence_ids.push(item.id);
+    await this.progress(run, "review_observed", `Observed ${item.kind} ${item.id} from ${item.author}.`, { evidence_id: item.id, kind: item.kind });
   }
 
   private isChangeEvidence(item: ReviewEvidence, run: LoopRun): boolean {
@@ -436,37 +475,55 @@ export class LoopController {
 
   private async refreshAgent(run: LoopRun, agent: AgentTurnState): Promise<void> {
     if (!agent.topic_id) return;
+    const previousEpisode = agent.episode;
+    const cursor = Math.max(agent.dispatch_seq ?? 0, agent.last_agent_seq ?? 0);
     const [episode, messages] = await Promise.all([
       this.catsco.getEpisode(agent.topic_id),
-      this.catsco.getMessagesAfter(agent.topic_id, agent.dispatch_seq ?? 0),
+      this.catsco.getMessagesAfter(agent.topic_id, cursor),
     ]);
+    const observedAt = now();
+    const episodeChanged = (previousEpisode?.run_id ?? "") !== (episode?.run_id ?? "")
+      || (previousEpisode?.state ?? "") !== (episode?.state ?? "")
+      || (previousEpisode?.updated_at ?? "") !== (episode?.updated_at ?? "");
     agent.episode = episode;
-    agent.episode_observed_at = now();
-    const response = messages.filter((message) => message.from_uid === agent.agent_uid && message.id > (agent.dispatch_seq ?? 0)).at(-1);
+    agent.episode_observed_at = observedAt;
+    const responses = messages.filter((message) => message.from_uid === agent.agent_uid);
+    const response = responses.at(-1);
     if (response) {
-      agent.last_agent_seq = response.id;
-      const text = typeof response.content === "string" ? response.content : "";
+      agent.last_agent_seq = Number(response.seq_id ?? response.id);
+    }
+    const directResponse = responses.filter((message) => !message.content_blocks?.some((block) => block.type === "tool_use" || block.type === "tool_result")).at(-1);
+    if (directResponse) {
+      const text = typeof directResponse.content === "string" ? directResponse.content : "";
       const strictWorkerRefusal = /(?:missing|缺少|未收到)[\s\S]{0,600}(?:LOOP_WORKTREE_CONTRACT_V1|execute_attempt|workspaceLease|targetTopicId)/i.test(text)
         && /(?:cannot|can't|refus|不能|无法)[\s\S]{0,600}(?:execute|proceed|create|push|执行|创建|推送|进入)/i.test(text);
-      if (agent === run.developer && strictWorkerRefusal) {
-        agent.protocol_error = "Selected Developer is a strict execute_attempt worker and cannot accept direct-prompt Loop tasks. Choose a direct-capable Developer Agent or integrate the separate native A2A Harness.";
+      if (agent === run.developer) {
+        agent.protocol_error = strictWorkerRefusal
+          ? "Selected Developer is a strict execute_attempt worker and cannot accept direct-prompt Loop tasks. Choose a direct-capable Developer Agent or integrate the separate native A2A Harness."
+          : undefined;
       }
       if (agent === run.monday) {
         const marker = `LOOP_BLOCKED_GITHUB_AUTH reviewer=${run.monday_github_login}`;
         const exactMarker = text.split(/\r?\n/).some((line) => line.trim() === marker);
-        const directAgentDelivery = !/^Command (?:completed|failed|timed out)\b/i.test(text.trim());
         const explicitUnavailable = text.includes(run.monday_github_login)
           && /(?:credential|凭据|身份)[\s\S]{0,120}(?:unavailable|missing|未提供|不可用|无法)/i.test(text);
-        if (exactMarker || (directAgentDelivery && explicitUnavailable)) {
+        if (exactMarker || explicitUnavailable) {
           agent.github_auth_error = `Required Monday GitHub reviewer identity ${run.monday_github_login} is unavailable; Run and PR were preserved for operator recovery.`;
         }
       }
     }
     agent.episode_started = Boolean(
-      response || (episode?.run_id && episode.run_id !== agent.previous_episode_run_id),
+      agent.episode_started || response || (episode?.run_id && episode.run_id !== agent.previous_episode_run_id),
     );
-    run.updated_at = now();
+    const activity = [response ? "agent_message" : undefined, episodeChanged ? "episode_changed" : undefined]
+      .filter((value): value is string => Boolean(value));
+    if (activity.length) run.last_activity_at = observedAt;
+    run.activity_state = computeActivityState(run, Date.parse(observedAt), this.config.activityStallMs);
+    run.updated_at = observedAt;
     await this.store.writeRun(run);
+    if (activity.length) {
+      await this.store.appendEvent(run, { type: "agent_activity", message: "Observed new controlled-Agent activity.", data: { activity } });
+    }
   }
 
   private async findAndStoreFinding(run: LoopRun, agent: AgentTurnState, afterMessageId: number): Promise<LoopRun["latest_finding"] | undefined> {
@@ -530,7 +587,6 @@ export class LoopController {
   private async recoverIfTerminal(run: LoopRun, agent: AgentTurnState, role: "Monday" | "Developer", missing: string): Promise<LoopRun> {
     const episode = agent.episode;
     if (!agent.episode_started || !episode || !EPISODE_TERMINAL.has(episode.state)) return run;
-    if (Date.now() - Date.parse(run.last_progress_at) >= this.config.stageTimeoutMs) return await this.block(run, `No mechanical progress for 45 minutes; still missing ${missing}.`);
     if (run.recovery_attempt >= RECOVERY_DELAYS.length) return await this.block(run, `Recovery attempts exhausted; still missing ${missing}.`);
     run.resume_phase = run.phase as Exclude<RunPhase, "recovering">;
     run.next_retry_at = new Date(Date.now() + RECOVERY_DELAYS[run.recovery_attempt]!).toISOString();
@@ -544,8 +600,17 @@ export class LoopController {
     const phase = run.resume_phase;
     if (!phase) return await this.block(run, "Recovery phase lost its resume target.");
     run.phase = phase;
-    run.recovery_attempt += 1;
     run.next_retry_at = undefined;
+    const reconciled = phase === "monday_finding"
+      ? await this.reconcileMondayFinding(run, false)
+      : phase === "developer_implementing"
+        ? await this.reconcileDeveloper(run, true, false)
+        : phase === "monday_review"
+          ? await this.reconcileMondayReview(run, true, false)
+          : run;
+    if (reconciled.phase !== phase) return reconciled;
+    run = reconciled;
+    run.recovery_attempt += 1;
     if (phase === "monday_finding" || phase === "monday_review") {
       const missing = phase === "monday_finding" ? "a validated Finding ZIP" : run.waiting_for.replace(/; recovery scheduled$/, "");
       run.monday_attempt += 1;
@@ -593,6 +658,34 @@ export class LoopController {
     return "controller";
   }
 
+  private absoluteTimeoutReached(run: LoopRun): boolean {
+    const created = Date.parse(run.created_at);
+    return Number.isFinite(created) && Date.now() - created >= this.config.runAbsoluteTimeoutMs;
+  }
+
+  private mechanicalTimeoutReached(run: LoopRun): boolean {
+    const progress = Date.parse(run.last_progress_at);
+    return Number.isFinite(progress) && Date.now() - progress >= this.config.stageTimeoutMs;
+  }
+
+  private mechanicalTimeoutCanBlock(run: LoopRun): boolean {
+    if (run.phase === "recovering") return false;
+    const agent = activityAgent(run);
+    if (run.recovery_attempt > 0 && agent && !agent.episode_started) return false;
+    if (agent?.episode?.state === "running") return false;
+    if (agent?.episode_started && agent.episode && EPISODE_TERMINAL.has(agent.episode.state)) return false;
+    return true;
+  }
+
+  private async updateActivityState(run: LoopRun): Promise<void> {
+    const state = computeActivityState(run, Date.now(), this.config.activityStallMs);
+    if (state === run.activity_state) return;
+    run.activity_state = state;
+    run.updated_at = now();
+    await this.store.writeRun(run);
+    await this.store.appendEvent(run, { type: "activity_state_changed", message: `Activity state changed to ${state}.`, data: { state } });
+  }
+
   private async block(run: LoopRun, reason: string): Promise<LoopRun> {
     this.rememberResumePhase(run);
     run.terminal_reason = reason;
@@ -630,6 +723,7 @@ export class LoopController {
     run.active_actor = actor;
     run.waiting_for = waitingFor;
     run.updated_at = now();
+    run.activity_state = computeActivityState(run, Date.parse(run.updated_at), this.config.activityStallMs);
     await this.store.writeRun(run);
     await this.store.appendEvent(run, { type: "phase_changed", message, data: { from: previous, to: phase, waiting_for: waitingFor } });
     return run;

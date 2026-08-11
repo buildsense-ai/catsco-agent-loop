@@ -72,10 +72,10 @@ export class FakeCatsco implements ICatscoClient {
     topic.episode = { topic_id: topicId, run_id: `episode_${this.nextMessage}`, state, source_uid: topic.agentUid, updated_at: new Date().toISOString() };
   }
 
-  agentReply(topicId: string, text: string) {
+  agentReply(topicId: string, text: string, contentBlocks?: Array<Record<string, unknown>>) {
     const topic = this.topics.get(topicId)!;
     const id = this.nextMessage++;
-    topic.messages.push({ id, seq_id: id, topic_id: topicId, from_uid: topic.agentUid, content: text });
+    topic.messages.push({ id, seq_id: id, topic_id: topicId, from_uid: topic.agentUid, content: text, ...(contentBlocks ? { content_blocks: contentBlocks } : {}) });
     return id;
   }
 
