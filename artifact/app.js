@@ -99,7 +99,11 @@ function renderDetail() {
   setText("headSha", short(run.pr?.head_sha, 12));
   setText("repo", `${run.repo} @ ${run.base_branch}`);
   setText("branch", run.branch);
+  setText("reviewCycle", run.review_cycle
+    ? `C${run.review_cycle.cycle} · ${run.review_cycle.status} · ${short(run.review_cycle.head_sha, 12)}`
+    : "not started");
   setText("finding", run.latest_finding ? `v${run.latest_finding.version} · ${short(run.latest_finding.sha256, 14)} · ${Math.ceil(run.latest_finding.size / 1024)} KB` : "—");
+  setText("findingHistory", `${run.finding_history?.length ?? 0} validated · ${run.review_cycles?.length ?? 0} review cycles`);
   setText("mondayTopic", run.monday.topic_id || "—");
   setText("mondayObservation", episodeObservation(run.monday, run.active_actor === "monday"));
   setText("developerTopic", run.developer.topic_id || "—");

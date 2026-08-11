@@ -11,6 +11,47 @@ const TERMINAL = new Set<RunPhase>([
   "completed",
 ]);
 
+function normalizeRun(run: LoopRun, activityStallMs: number): void {
+  if (!run.last_activity_at) run.last_activity_at = run.last_progress_at || run.updated_at || run.created_at;
+  run.activity_state = computeActivityState(run, Date.now(), activityStallMs);
+  run.review_progress_evidence_ids ??= [];
+  run.finding_history ??= [];
+  run.review_cycles ??= [];
+
+  for (const finding of [run.latest_finding, run.pending_review_finding]) {
+    if (finding && !run.finding_history.some((item) => item.id === finding.id)) run.finding_history.push(finding);
+  }
+
+  // Legacy schema had one unscoped pending slot. Materialize one explicit
+  // cycle so a restart can never silently pair that ZIP with a future Head.
+  if (!run.review_cycle && run.review_requested_at && run.pr) {
+    const cycleNumber = Math.max(1, run.iteration + 1);
+    const isReviewActive = run.phase === "monday_review"
+      || run.resume_phase === "monday_review" && ["recovering", "blocked", "blocked_auth", "blocked_github_auth"].includes(run.phase);
+    const pending = run.pending_review_finding
+      ? { ...run.pending_review_finding, purpose: "review" as const, review_cycle: cycleNumber, head_sha: run.pr.head_sha }
+      : undefined;
+    if (pending) {
+      run.pending_review_finding = pending;
+      const index = run.finding_history.findIndex((item) => item.id === pending.id);
+      if (index >= 0) run.finding_history[index] = pending;
+      else run.finding_history.push(pending);
+    }
+    run.review_cycle = {
+      cycle: cycleNumber,
+      pr_number: run.pr.number,
+      head_sha: run.pr.head_sha,
+      requested_at: run.review_requested_at,
+      ...(run.review_dispatch_seq ? { dispatch_seq: run.review_dispatch_seq } : {}),
+      baseline_evidence_ids: [...(run.review_baseline_comment_ids ?? [])],
+      status: isReviewActive ? "active" : run.phase === "completed" ? "approved" : "superseded",
+      ...(pending ? { finding: pending } : {}),
+      ...(!isReviewActive ? { completed_at: run.updated_at, completion_reason: "Migrated from legacy unscoped review state." } : {}),
+    };
+    run.review_cycles.push(run.review_cycle);
+  }
+}
+
 export class RunStore {
   constructor(readonly root: string, readonly activityStallMs = DEFAULT_ACTIVITY_STALL_MS) {}
 
@@ -47,13 +88,7 @@ export class RunStore {
 
   async readRun(runId: string): Promise<LoopRun> {
     const run = JSON.parse(await readFile(join(this.runDir(runId), "run.json"), "utf8")) as LoopRun;
-    if (!run.last_activity_at) {
-      run.last_activity_at = run.last_progress_at || run.updated_at || run.created_at;
-    }
-    run.activity_state = computeActivityState(run, Date.now(), this.activityStallMs);
-    if (!run.review_progress_evidence_ids) {
-      run.review_progress_evidence_ids = [];
-    }
+    normalizeRun(run, this.activityStallMs);
     return run;
   }
 
@@ -71,6 +106,8 @@ export class RunStore {
       try {
         const path = join(this.runDir(entry.name), "run.json");
         const run = JSON.parse(await readFile(path, "utf8")) as LoopRun;
+        const before = JSON.stringify(run);
+        normalizeRun(run, this.activityStallMs);
         let changed = false;
         if (!run.last_progress_at) {
           run.last_progress_at = run.updated_at || run.created_at;
@@ -84,10 +121,11 @@ export class RunStore {
           run.activity_state = computeActivityState(run, Date.now(), this.activityStallMs);
           changed = true;
         }
-        if (!run.review_progress_evidence_ids) {
-          run.review_progress_evidence_ids = [];
+        if (run.schema_version !== 2) {
+          run.schema_version = 2;
           changed = true;
         }
+        if (JSON.stringify(run) !== before) changed = true;
         if (!changed) continue;
         await this.writeRun(run);
         migrated.push(run.run_id);
