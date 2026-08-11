@@ -219,6 +219,48 @@ test("missing required Monday reviewer identity blocks GitHub auth without futil
   assert.equal(run.phase, "blocked_github_auth");
   assert.equal(run.recovery_attempt, 0);
   assert.match(run.last_error!, /monday-reviewer/);
+  const topic = run.monday.topic_id!;
+  const priorDispatch = run.monday.dispatch_seq;
+  run = await ctx.controller.resume(run.run_id);
+  assert.equal(run.phase, "monday_review");
+  assert.equal(run.monday.topic_id, topic);
+  assert.ok(run.monday.dispatch_seq! > priorDispatch!);
+  assert.equal(run.monday.github_auth_error, undefined);
+  assert.match(String(ctx.catsco.topics.get(topic)!.messages.at(-1)?.content), /monday-reviewer/);
+  ctx.github.evidence.push({ id: "review:restored", kind: "review", author: "monday-reviewer", state: "APPROVED", commit_id: "abc123", created_at: new Date().toISOString() });
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "completed");
+});
+
+test("recovery message keys remain unique after partial mechanical progress resets backoff", async () => {
+  const ctx = await setup();
+  let run = await advanceToReview(ctx);
+  const topic = run.monday.topic_id!;
+  ctx.catsco.finish(topic);
+  await ctx.controller.tick();
+  await ctx.controller.reconcile(run.run_id);
+  run = await ctx.store.readRun(run.run_id);
+  const firstKey = run.monday.last_prompt_key;
+  ctx.catsco.addFinding(topic, "finding-v2.zip");
+  ctx.catsco.finish(topic);
+  await ctx.controller.tick();
+  await ctx.controller.reconcile(run.run_id);
+  run = await ctx.store.readRun(run.run_id);
+  assert.notEqual(run.monday.last_prompt_key, firstKey);
+  const controllerMessages = ctx.catsco.topics.get(topic)!.messages.filter((message) => message.from_uid === 363);
+  assert.equal(new Set(controllerMessages.map((message) => message.client_msg_id)).size, controllerMessages.length);
+});
+
+test("global no-progress timeout blocks a still-running Episode", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  run.last_progress_at = new Date(Date.now() - ctx.config.stageTimeoutMs - 1).toISOString();
+  await ctx.store.writeRun(run);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "blocked");
+  assert.match(run.terminal_reason!, /No mechanical progress/);
 });
 
 test("manual reconcile and scheduler serialize per Run", async () => {

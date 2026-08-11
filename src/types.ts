@@ -31,8 +31,10 @@ export interface AgentTurnState {
   dispatch_message_id?: number;
   previous_episode_run_id?: string;
   episode?: EpisodeStatus;
+  episode_observed_at?: string;
   episode_started: boolean;
   last_agent_seq?: number;
+  last_observed_seq?: number;
   last_prompt_key?: string;
   protocol_error?: string;
   github_auth_error?: string;
@@ -59,6 +61,9 @@ export interface PullRequestState {
   base_ref: string;
   head_ref: string;
   head_sha: string;
+  author_login?: string;
+  head_repository?: string;
+  head_repository_owner?: string;
   expected_previous_sha?: string;
   first_seen_at: string;
 }
@@ -114,6 +119,7 @@ export interface LoopRun {
   created_at: string;
   updated_at: string;
   last_progress_at: string;
+  github_polled_at?: string;
   next_retry_at?: string;
   last_error?: string;
   terminal_reason?: string;

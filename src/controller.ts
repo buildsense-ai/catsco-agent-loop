@@ -132,12 +132,23 @@ export class LoopController {
     return await this.withRunLock(runId, async () => {
       const run = await this.store.readRun(runId);
       if (!["blocked", "blocked_auth", "blocked_github_auth"].includes(run.phase)) return run;
+      const reviewerAuthBlocked = Boolean(run.monday.github_auth_error);
       run.last_error = undefined;
       run.terminal_reason = undefined;
       run.paused_for_manual_message = undefined;
       run.next_retry_at = undefined;
       run.recovery_attempt = 0;
       const phase = run.resume_phase ?? this.inferResumePhase(run);
+      if (reviewerAuthBlocked && phase === "monday_review" && run.monday.topic_id) {
+        run.monday.github_auth_error = undefined;
+        run.monday_attempt += 1;
+        await this.dispatch(run, run.monday, `monday-auth-resume-${run.monday_attempt}-${run.pr?.head_sha.slice(0, 8) ?? "nohead"}`, {
+          topicId: run.monday.topic_id,
+          clientMsgId: "",
+          text: supplementPrompt(run, "Monday", `a ${run.monday_github_login} GitHub review on the current PR Head`),
+        });
+        return await this.transition(run, phase, this.actorFor(phase), `GitHub review by ${run.monday_github_login}`, "Reviewer credentials were marked restored; a fresh prompt was sent to the original Monday Topic.");
+      }
       return await this.transition(run, phase, this.actorFor(phase), "manual reconciliation", "Operator resumed the existing Run; no new Topic was created.");
     });
   }
@@ -170,6 +181,9 @@ export class LoopController {
     try {
       if (run.cancel_requested) return await this.transition(run, "cancelled", "none", "cancelled by operator", "Run cancelled. Sessions and GitHub resources were preserved.");
       if (!forced && run.next_retry_at && Date.parse(run.next_retry_at) > Date.now()) return run;
+      if (run.phase !== "queued" && Date.now() - Date.parse(run.last_progress_at) >= this.config.stageTimeoutMs) {
+        return await this.block(run, `No mechanical progress for ${Math.round(this.config.stageTimeoutMs / 60_000)} minutes while waiting for ${run.waiting_for}.`);
+      }
       if (!this.validatedRepos.has(run.repo)) {
         await this.github.validate(run.repo);
         this.validatedRepos.add(run.repo);
@@ -279,9 +293,14 @@ export class LoopController {
       run.ci = undefined;
       await this.progress(run, "head_changed", `PR Head changed to ${current.head_sha}; old approval and CI are invalid.`, { sha: current.head_sha });
     }
+    const previousCiState = run.ci?.state;
     run.ci = await this.github.getCi(run.repo, run.pr.head_sha, run.ci);
-    run.updated_at = now();
-    await this.store.writeRun(run);
+    if (run.ci.state !== "pending" && run.ci.state !== previousCiState) {
+      await this.progress(run, "ci_observed", `CI reached ${run.ci.state} for ${run.pr.head_sha}.`, { sha: run.pr.head_sha, state: run.ci.state });
+    } else {
+      run.updated_at = now();
+      await this.store.writeRun(run);
+    }
     if (run.ci.state === "pending") return run;
     if (run.ci.state === "failure") {
       const detail = run.ci.checks.filter((check) => ["failure", "cancelled", "timed_out", "action_required", "stale", "error"].includes((check.conclusion ?? "").toLowerCase()))
@@ -367,6 +386,7 @@ export class LoopController {
       this.catsco.getMessages(agent.topic_id, 100),
     ]);
     agent.episode = episode;
+    agent.episode_observed_at = now();
     const response = messages.filter((message) => message.from_uid === agent.agent_uid && message.id > (agent.dispatch_seq ?? 0)).at(-1);
     if (response) {
       agent.last_agent_seq = response.id;
@@ -470,16 +490,16 @@ export class LoopController {
     run.next_retry_at = undefined;
     if (phase === "monday_finding" || phase === "monday_review") {
       const missing = phase === "monday_finding" ? "a validated Finding ZIP" : run.waiting_for.replace(/; recovery scheduled$/, "");
-      await this.dispatch(run, run.monday, `recovery-monday-${phase}-${run.recovery_attempt}-${run.iteration}`, {
+      run.monday_attempt += 1;
+      await this.dispatch(run, run.monday, `recovery-monday-${phase}-${run.monday_attempt}-${run.iteration}`, {
         topicId: run.monday.topic_id!, clientMsgId: "", text: supplementPrompt(run, "Monday", missing),
       });
-      run.monday_attempt += 1;
     } else if (phase === "developer_implementing") {
       const missing = run.waiting_for.replace(/; recovery scheduled$/, "");
-      await this.dispatch(run, run.developer, `recovery-developer-${run.recovery_attempt}-${run.iteration}`, {
+      run.developer_attempt += 1;
+      await this.dispatch(run, run.developer, `recovery-developer-${run.developer_attempt}-${run.iteration}`, {
         topicId: run.developer.topic_id!, clientMsgId: "", text: supplementPrompt(run, "Developer", missing),
       });
-      run.developer_attempt += 1;
     }
     return await this.transition(run, phase, this.actorFor(phase), run.waiting_for.replace(/; recovery scheduled$/, ""), "Recovery prompt sent to the original Topic after reconciliation.");
   }
@@ -550,7 +570,6 @@ export class LoopController {
     run.active_actor = actor;
     run.waiting_for = waitingFor;
     run.updated_at = now();
-    if (phase !== "recovering") run.last_progress_at = run.updated_at;
     await this.store.writeRun(run);
     await this.store.appendEvent(run, { type: "phase_changed", message, data: { from: previous, to: phase, waiting_for: waitingFor } });
     return run;
