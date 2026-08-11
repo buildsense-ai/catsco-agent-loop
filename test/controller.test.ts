@@ -229,6 +229,62 @@ test("Developer terminal Episode without PR schedules recovery on the same Topic
   assert.equal(run.phase, "developer_implementing");
 });
 
+test("recovery backoff still observes Agent activity without resending", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  const topic = run.developer.topic_id!;
+  ctx.catsco.agentReply(topic, "done without PR");
+  ctx.catsco.finish(topic);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "recovering");
+  const retryAt = run.next_retry_at;
+  const controllerMessages = ctx.catsco.topics.get(topic)!.messages.filter((message) => message.from_uid === 363).length;
+  run.last_activity_at = "2000-01-01T00:00:00.000Z";
+  await ctx.store.writeRun(run);
+
+  ctx.catsco.agentReply(topic, "late background progress");
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+
+  assert.equal(run.phase, "recovering");
+  assert.equal(run.next_retry_at, retryAt);
+  assert.notEqual(run.last_activity_at, "2000-01-01T00:00:00.000Z");
+  assert.equal(ctx.catsco.topics.get(topic)!.messages.filter((message) => message.from_uid === 363).length, controllerMessages);
+});
+
+test("recovery reconciles an externally created PR before sending another prompt", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  const topic = run.developer.topic_id!;
+  ctx.catsco.agentReply(topic, "done without PR");
+  ctx.catsco.finish(topic);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "recovering");
+  const controllerMessages = ctx.catsco.topics.get(topic)!.messages.filter((message) => message.from_uid === 363).length;
+  ctx.github.pr = {
+    number: 42,
+    url: "https://github.com/acme/widget/pull/42",
+    state: "OPEN",
+    base_ref: "main",
+    head_ref: run.branch,
+    head_sha: "abc123",
+    author_login: "developer",
+    head_repository: "acme/widget",
+    head_repository_owner: "acme",
+    first_seen_at: new Date().toISOString(),
+  };
+
+  await ctx.controller.reconcile(run.run_id);
+  run = await ctx.store.readRun(run.run_id);
+
+  assert.equal(run.phase, "waiting_ci");
+  assert.equal(run.pr?.head_sha, "abc123");
+  assert.equal(run.recovery_attempt, 0);
+  assert.equal(ctx.catsco.topics.get(topic)!.messages.filter((message) => message.from_uid === 363).length, controllerMessages);
+});
+
 test("Monday review with ZIP only preserves partial delivery and asks only for GitHub evidence", async () => {
   const ctx = await setup();
   let run = await advanceToReview(ctx);
@@ -271,6 +327,19 @@ test("protocol names inside ordinary tool output do not misclassify a direct Dev
   let run = await advanceToDeveloper(ctx);
   const topic = run.developer.topic_id!;
   ctx.catsco.agentReply(topic, "Command completed: README says a strict execute_attempt worker requires LOOP_WORKTREE_CONTRACT_V1 and workspaceLease.");
+  ctx.catsco.finish(topic);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "recovering");
+  assert.equal(run.developer.protocol_error, undefined);
+});
+
+test("strict worker refusal text inside a structured tool result is not treated as a Developer refusal", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  const topic = run.developer.topic_id!;
+  const text = "Missing LOOP_WORKTREE_CONTRACT_V1 and workspaceLease; cannot create or push the PR.";
+  ctx.catsco.agentReply(topic, text, [{ type: "tool_result", tool_use_id: "call_read", content: text }]);
   ctx.catsco.finish(topic);
   await ctx.controller.tick();
   run = await ctx.store.readRun(run.run_id);

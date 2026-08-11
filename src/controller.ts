@@ -215,6 +215,12 @@ export class LoopController {
         return await this.block(run, `Run exceeded the absolute limit of ${Math.round(this.config.runAbsoluteTimeoutMs / 60_000)} minutes.`);
       }
       if (!forced && run.next_retry_at && Date.parse(run.next_retry_at) > Date.now()) {
+        if (await this.detectManualMessage(run)) {
+          this.rememberResumePhase(run);
+          return await this.transition(run, "blocked", "none", "manual message detected", "A non-Controller human message entered a controlled Topic; Run paused to prevent double driving.");
+        }
+        const waitingAgent = activityAgent(run);
+        if (waitingAgent) await this.refreshAgent(run, waitingAgent);
         await this.updateActivityState(run);
         return run;
       }
@@ -280,7 +286,7 @@ export class LoopController {
     return await this.transition(run, "monday_finding", "monday", "validated Finding ZIP", "Monday Agent Task created and initial finding request sent.");
   }
 
-  private async reconcileMondayFinding(run: LoopRun): Promise<LoopRun> {
+  private async reconcileMondayFinding(run: LoopRun, allowRecovery = true): Promise<LoopRun> {
     const finding = await this.findAndStoreFinding(run, run.monday, run.latest_finding?.source_message_id ?? 0);
     if (finding) {
       run.latest_finding = finding;
@@ -301,10 +307,14 @@ export class LoopController {
       });
       return await this.transition(run, "developer_implementing", "developer", `open PR on ${run.branch}`, "Finding ZIP validated and handed to Developer in a dedicated Agent Task.");
     }
-    return await this.recoverIfTerminal(run, run.monday, "Monday", "a downloadable ZIP containing FINDING.md and manifest.json");
+    const missing = "a downloadable ZIP containing FINDING.md and manifest.json";
+    if (allowRecovery) return await this.recoverIfTerminal(run, run.monday, "Monday", missing);
+    run.waiting_for = missing;
+    await this.store.writeRun(run);
+    return run;
   }
 
-  private async reconcileDeveloper(run: LoopRun, forced = false): Promise<LoopRun> {
+  private async reconcileDeveloper(run: LoopRun, forced = false, allowRecovery = true): Promise<LoopRun> {
     if (run.developer.protocol_error && run.developer.episode_started && run.developer.episode && EPISODE_TERMINAL.has(run.developer.episode.state)) {
       return await this.block(run, run.developer.protocol_error);
     }
@@ -325,7 +335,10 @@ export class LoopController {
       return await this.transition(run, "waiting_ci", "github", `CI for ${pull.head_sha}`, "Developer GitHub delivery verified mechanically.");
     }
     const missing = run.pr ? `a new Head SHA on existing PR #${run.pr.number}` : `an open PR from ${run.branch} to ${run.base_branch}`;
-    return await this.recoverIfTerminal(run, run.developer, "Developer", missing);
+    if (allowRecovery) return await this.recoverIfTerminal(run, run.developer, "Developer", missing);
+    run.waiting_for = missing;
+    await this.store.writeRun(run);
+    return run;
   }
 
   private async reconcileCi(run: LoopRun, forced = false): Promise<LoopRun> {
@@ -370,7 +383,7 @@ export class LoopController {
     return await this.transition(run, "monday_review", "monday", "current-SHA approval or comment plus new Finding ZIP", `CI ${run.ci.state}; review request sent to the original Monday Topic.`);
   }
 
-  private async reconcileMondayReview(run: LoopRun, forced = false): Promise<LoopRun> {
+  private async reconcileMondayReview(run: LoopRun, forced = false, allowRecovery = true): Promise<LoopRun> {
     if (!run.pr) return await this.block(run, "Monday review phase has no tracked PR.");
     const terminalEpisode = Boolean(run.monday.episode_started && run.monday.episode && EPISODE_TERMINAL.has(run.monday.episode.state));
     if (!await this.beginGithubPoll(run, forced || terminalEpisode || Boolean(run.monday.github_auth_error))) return run;
@@ -423,7 +436,10 @@ export class LoopController {
       return await this.transition(run, "blocked_github_auth", "none", `GitHub reviewer identity ${run.monday_github_login}`, run.monday.github_auth_error);
     }
     const missing = newComment ? "a new validated Finding ZIP" : newFinding ? "a Monday GitHub review/comment on the current PR Head" : "either current-SHA APPROVED, or both a GitHub review/comment and new Finding ZIP";
-    return await this.recoverIfTerminal(run, run.monday, "Monday", missing);
+    if (allowRecovery) return await this.recoverIfTerminal(run, run.monday, "Monday", missing);
+    run.waiting_for = missing;
+    await this.store.writeRun(run);
+    return run;
   }
 
   private async recordReviewProgress(run: LoopRun, item: ReviewEvidence): Promise<void> {
@@ -465,27 +481,32 @@ export class LoopController {
       this.catsco.getMessagesAfter(agent.topic_id, cursor),
     ]);
     const observedAt = now();
-    const response = messages.filter((message) => message.from_uid === agent.agent_uid).at(-1);
     const episodeChanged = (previousEpisode?.run_id ?? "") !== (episode?.run_id ?? "")
       || (previousEpisode?.state ?? "") !== (episode?.state ?? "")
       || (previousEpisode?.updated_at ?? "") !== (episode?.updated_at ?? "");
     agent.episode = episode;
     agent.episode_observed_at = observedAt;
+    const responses = messages.filter((message) => message.from_uid === agent.agent_uid);
+    const response = responses.at(-1);
     if (response) {
       agent.last_agent_seq = Number(response.seq_id ?? response.id);
-      const text = typeof response.content === "string" ? response.content : "";
+    }
+    const directResponse = responses.filter((message) => !message.content_blocks?.some((block) => block.type === "tool_use" || block.type === "tool_result")).at(-1);
+    if (directResponse) {
+      const text = typeof directResponse.content === "string" ? directResponse.content : "";
       const strictWorkerRefusal = /(?:missing|缺少|未收到)[\s\S]{0,600}(?:LOOP_WORKTREE_CONTRACT_V1|execute_attempt|workspaceLease|targetTopicId)/i.test(text)
         && /(?:cannot|can't|refus|不能|无法)[\s\S]{0,600}(?:execute|proceed|create|push|执行|创建|推送|进入)/i.test(text);
-      if (agent === run.developer && strictWorkerRefusal) {
-        agent.protocol_error = "Selected Developer is a strict execute_attempt worker and cannot accept direct-prompt Loop tasks. Choose a direct-capable Developer Agent or integrate the separate native A2A Harness.";
+      if (agent === run.developer) {
+        agent.protocol_error = strictWorkerRefusal
+          ? "Selected Developer is a strict execute_attempt worker and cannot accept direct-prompt Loop tasks. Choose a direct-capable Developer Agent or integrate the separate native A2A Harness."
+          : undefined;
       }
       if (agent === run.monday) {
         const marker = `LOOP_BLOCKED_GITHUB_AUTH reviewer=${run.monday_github_login}`;
         const exactMarker = text.split(/\r?\n/).some((line) => line.trim() === marker);
-        const directAgentDelivery = !/^Command (?:completed|failed|timed out)\b/i.test(text.trim());
         const explicitUnavailable = text.includes(run.monday_github_login)
           && /(?:credential|凭据|身份)[\s\S]{0,120}(?:unavailable|missing|未提供|不可用|无法)/i.test(text);
-        if (exactMarker || (directAgentDelivery && explicitUnavailable)) {
+        if (exactMarker || explicitUnavailable) {
           agent.github_auth_error = `Required Monday GitHub reviewer identity ${run.monday_github_login} is unavailable; Run and PR were preserved for operator recovery.`;
         }
       }
@@ -578,8 +599,17 @@ export class LoopController {
     const phase = run.resume_phase;
     if (!phase) return await this.block(run, "Recovery phase lost its resume target.");
     run.phase = phase;
-    run.recovery_attempt += 1;
     run.next_retry_at = undefined;
+    const reconciled = phase === "monday_finding"
+      ? await this.reconcileMondayFinding(run, false)
+      : phase === "developer_implementing"
+        ? await this.reconcileDeveloper(run, true, false)
+        : phase === "monday_review"
+          ? await this.reconcileMondayReview(run, true, false)
+          : run;
+    if (reconciled.phase !== phase) return reconciled;
+    run = reconciled;
+    run.recovery_attempt += 1;
     if (phase === "monday_finding" || phase === "monday_review") {
       const missing = phase === "monday_finding" ? "a validated Finding ZIP" : run.waiting_for.replace(/; recovery scheduled$/, "");
       run.monday_attempt += 1;
