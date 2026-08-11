@@ -139,9 +139,16 @@ test("manual message pauses controlled run and resume preserves Topic", async ()
   run = await ctx.store.readRun(run.run_id);
   assert.equal(run.phase, "blocked");
   assert.equal(run.paused_for_manual_message?.message_id, id);
+  const staleProgress = new Date(Date.now() - ctx.config.stageTimeoutMs - 1).toISOString();
+  run.last_progress_at = staleProgress;
+  await ctx.store.writeRun(run);
   run = await ctx.controller.resume(run.run_id);
   assert.equal(run.phase, "monday_finding");
   assert.equal(run.monday.topic_id, topic.messages[0]?.topic_id);
+  assert.ok(Date.parse(run.last_progress_at) > Date.parse(staleProgress));
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.notEqual(run.phase, "blocked");
 });
 
 test("GitHub polling is throttled within a phase while CatsCompany can still refresh", async () => {
@@ -255,6 +262,19 @@ test("protocol names inside ordinary tool output do not misclassify a direct Dev
   assert.equal(run.developer.protocol_error, undefined);
 });
 
+test("GitHub auth marker inside Monday tool transcript is not a blocking delivery", async () => {
+  const ctx = await setup();
+  let run = await advanceToReview(ctx);
+  ctx.catsco.agentReply(
+    run.monday.topic_id!,
+    "Command completed\nstatus: succeeded\ncommand: if missing: print('LOOP_BLOCKED_GITHUB_AUTH reviewer=monday-reviewer')\nstdout:\nAPPROVED",
+  );
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.notEqual(run.phase, "blocked_github_auth");
+  assert.equal(run.monday.github_auth_error, undefined);
+});
+
 test("missing required Monday reviewer identity blocks GitHub auth without futile recovery", async () => {
   const ctx = await setup();
   let run = await advanceToReview(ctx);
@@ -267,11 +287,14 @@ test("missing required Monday reviewer identity blocks GitHub auth without futil
   assert.match(run.last_error!, /monday-reviewer/);
   const topic = run.monday.topic_id!;
   const priorDispatch = run.monday.dispatch_seq;
+  run.pending_review_finding = run.latest_finding;
+  await ctx.store.writeRun(run);
   run = await ctx.controller.resume(run.run_id);
   assert.equal(run.phase, "monday_review");
   assert.equal(run.monday.topic_id, topic);
   assert.ok(run.monday.dispatch_seq! > priorDispatch!);
   assert.equal(run.monday.github_auth_error, undefined);
+  assert.equal(run.pending_review_finding, undefined);
   assert.match(String(ctx.catsco.topics.get(topic)!.messages.at(-1)?.content), /monday-reviewer/);
   ctx.github.evidence.push({ id: "review:restored", kind: "review", author: "monday-reviewer", state: "APPROVED", commit_id: "abc123", created_at: new Date().toISOString() });
   await ctx.controller.tick();

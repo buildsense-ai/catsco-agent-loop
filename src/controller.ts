@@ -153,9 +153,17 @@ export class LoopController {
       run.paused_for_manual_message = undefined;
       run.next_retry_at = undefined;
       run.recovery_attempt = 0;
+      // An explicit operator resume starts a fresh recovery window. Without
+      // this, an old blocked Run can immediately trip the global stage timeout
+      // before the resumed Agent Episode has a chance to start.
+      run.last_progress_at = now();
       const phase = run.resume_phase ?? this.inferResumePhase(run);
       if (reviewerAuthBlocked && phase === "monday_review" && run.monday.topic_id) {
         run.monday.github_auth_error = undefined;
+        // A Finding captured before reviewer credentials were restored is only
+        // a partial delivery from the failed review attempt. Do not pair it
+        // with a later review from the restored identity.
+        run.pending_review_finding = undefined;
         run.monday_attempt += 1;
         await this.dispatch(run, run.monday, `monday-auth-resume-${run.monday_attempt}-${run.pr?.head_sha.slice(0, 8) ?? "nohead"}`, {
           topicId: run.monday.topic_id,
@@ -445,9 +453,11 @@ export class LoopController {
       }
       if (agent === run.monday) {
         const marker = `LOOP_BLOCKED_GITHUB_AUTH reviewer=${run.monday_github_login}`;
+        const exactMarker = text.split(/\r?\n/).some((line) => line.trim() === marker);
+        const directAgentDelivery = !/^Command (?:completed|failed|timed out)\b/i.test(text.trim());
         const explicitUnavailable = text.includes(run.monday_github_login)
           && /(?:credential|凭据|身份)[\s\S]{0,120}(?:unavailable|missing|未提供|不可用|无法)/i.test(text);
-        if (text.includes(marker) || explicitUnavailable) {
+        if (exactMarker || (directAgentDelivery && explicitUnavailable)) {
           agent.github_auth_error = `Required Monday GitHub reviewer identity ${run.monday_github_login} is unavailable; Run and PR were preserved for operator recovery.`;
         }
       }
