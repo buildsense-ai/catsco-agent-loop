@@ -20,7 +20,7 @@ interface GhPull {
   headRefName: string;
   headRefOid: string;
   author?: { login?: string };
-  headRepository?: { nameWithOwner?: string };
+  headRepository?: { name?: string; nameWithOwner?: string };
   headRepositoryOwner?: { login?: string };
 }
 
@@ -58,7 +58,8 @@ export class GithubClient implements IGithubClient {
       head_ref: pull.headRefName,
       head_sha: pull.headRefOid,
       author_login: pull.author?.login ?? "",
-      head_repository: pull.headRepository?.nameWithOwner ?? "",
+      head_repository: pull.headRepository?.nameWithOwner
+        ?? (pull.headRepositoryOwner?.login && pull.headRepository?.name ? `${pull.headRepositoryOwner.login}/${pull.headRepository.name}` : ""),
       head_repository_owner: pull.headRepositoryOwner?.login ?? "",
       first_seen_at: new Date().toISOString(),
     };
