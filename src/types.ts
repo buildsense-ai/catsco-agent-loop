@@ -87,6 +87,8 @@ export interface DispatchReceipt {
   sent_at: string;
 }
 
+export type ActivityState = "active" | "quiet" | "suspected_stall";
+
 export interface LoopRun {
   schema_version: 1;
   run_id: string;
@@ -113,11 +115,14 @@ export interface LoopRun {
   review_requested_at?: string;
   review_dispatch_seq?: number;
   review_baseline_comment_ids: string[];
+  review_progress_evidence_ids: string[];
   sent_message_ids: number[];
   receipts: Record<string, DispatchReceipt>;
   paused_for_manual_message?: { topic_id: string; message_id: number; detected_at: string };
   created_at: string;
   updated_at: string;
+  activity_state: ActivityState;
+  last_activity_at: string;
   last_progress_at: string;
   github_polled_at?: string;
   github_poll_phase?: RunPhase;
@@ -218,5 +223,7 @@ export interface ControllerConfig {
   idlePollMs: number;
   noChecksGraceMs: number;
   stageTimeoutMs: number;
+  activityStallMs: number;
+  runAbsoluteTimeoutMs: number;
   maxFindingBytes: number;
 }

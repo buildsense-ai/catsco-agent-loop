@@ -1,5 +1,6 @@
 import { appendFile, mkdir, open, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { computeActivityState, DEFAULT_ACTIVITY_STALL_MS } from "./activity.js";
 import type { LoopRun, RunEvent, RunPhase } from "./types.js";
 
 const TERMINAL = new Set<RunPhase>([
@@ -11,7 +12,7 @@ const TERMINAL = new Set<RunPhase>([
 ]);
 
 export class RunStore {
-  constructor(readonly root: string) {}
+  constructor(readonly root: string, readonly activityStallMs = DEFAULT_ACTIVITY_STALL_MS) {}
 
   runDir(runId: string): string {
     if (!/^run_[a-z0-9_-]+$/i.test(runId)) throw new Error("Invalid run id");
@@ -45,7 +46,23 @@ export class RunStore {
   }
 
   async readRun(runId: string): Promise<LoopRun> {
-    return JSON.parse(await readFile(join(this.runDir(runId), "run.json"), "utf8")) as LoopRun;
+    const run = JSON.parse(await readFile(join(this.runDir(runId), "run.json"), "utf8")) as LoopRun;
+    let changed = false;
+    if (!run.last_activity_at) {
+      run.last_activity_at = run.last_progress_at || run.updated_at || run.created_at;
+      changed = true;
+    }
+    const state = computeActivityState(run, Date.now(), this.activityStallMs);
+    if (run.activity_state !== state) {
+      run.activity_state = state;
+      changed = true;
+    }
+    if (!run.review_progress_evidence_ids) {
+      run.review_progress_evidence_ids = [];
+      changed = true;
+    }
+    if (changed) await this.writeRun(run);
+    return run;
   }
 
   async listRuns(): Promise<LoopRun[]> {

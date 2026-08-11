@@ -8,7 +8,7 @@ import { RunStore } from "./store.js";
 
 export async function main(): Promise<void> {
   const config = loadConfig();
-  const store = new RunStore(config.stateDir);
+  const store = new RunStore(config.stateDir, config.activityStallMs);
   const catsco = new CatscoClient(config, join(config.stateDir, "..", "catsco-token.json"));
   const github = new GithubClient(config.noChecksGraceMs);
   const controller = new LoopController(config, store, catsco, github);

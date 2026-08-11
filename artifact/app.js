@@ -91,6 +91,8 @@ function renderDetail() {
   setText("waitingFor", run.waiting_for);
   setText("phase", run.phase.replaceAll("_", " "));
   setText("lastProgress", `progress ${age(run.last_progress_at)}`);
+  setText("activityState", run.activity_state?.replaceAll("_", " ") || "quiet");
+  setText("lastActivity", `activity ${age(run.last_activity_at)}`);
   setText("iteration", String(run.iteration).padStart(2, "0"));
   setText("attempts", `M ${run.monday_attempt} · D ${run.developer_attempt} · R ${run.recovery_attempt}`);
   setText("ciState", run.ci?.state || "not observed");

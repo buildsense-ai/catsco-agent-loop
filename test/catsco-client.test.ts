@@ -14,7 +14,7 @@ function config(base: string, state: string): ControllerConfig {
     controllerUid: 363, mondayAgentUid: 553, developerAgentUid: 559, mondayGithubLogin: "monday",
     developerGithubLogin: "developer", stateDir: state, host: "127.0.0.1", port: 0, operatorToken: "secret",
     maxActiveRuns: 1, catscoPollMs: 5, githubPollMs: 5, idlePollMs: 5, noChecksGraceMs: 0,
-    stageTimeoutMs: 45 * 60_000, maxFindingBytes: 1024,
+    stageTimeoutMs: 90 * 60_000, activityStallMs: 20 * 60_000, runAbsoluteTimeoutMs: 4 * 60 * 60_000, maxFindingBytes: 1024,
   };
 }
 
