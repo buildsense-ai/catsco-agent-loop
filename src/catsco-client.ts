@@ -149,7 +149,7 @@ export class CatscoClient implements ICatscoClient {
     const parsed = new URL(url, this.config.catscoBaseUrl);
     const base = new URL(this.config.catscoBaseUrl);
     if (parsed.origin !== base.origin) throw new LoopError("Finding URL is outside CatsCompany origin", "unsafe_file_url");
-    const response = await fetch(parsed, { headers: this.authHeaders() });
+    const response = await this.fetchDownload(parsed);
     if (!response.ok || !response.body) throw new LoopError(`Finding download failed: HTTP ${response.status}`, "download_failed", response.status >= 500);
     const declared = Number(response.headers.get("content-length") ?? 0);
     if (declared > maxBytes) throw new LoopError("Finding ZIP exceeds configured size limit", "finding_too_large");
@@ -180,12 +180,47 @@ export class CatscoClient implements ICatscoClient {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ account: this.config.catscoAccount, password: this.config.catscoPassword, persistent: true }),
+      signal: AbortSignal.timeout(60_000),
     });
     const body = await response.json().catch(() => ({})) as { token?: string; error?: string };
     if (!response.ok || !body.token) throw new CatscoAuthError(body.error ?? `CatsCompany login failed: HTTP ${response.status}`, response.status);
     this.token = body.token;
     await mkdir(dirname(this.tokenCachePath), { recursive: true, mode: 0o700 });
     await writeFile(this.tokenCachePath, `${JSON.stringify({ token: body.token, updated_at: new Date().toISOString() })}\n`, { mode: 0o600 });
+  }
+
+  private async fetchDownload(url: URL): Promise<Response> {
+    let loggedIn = false;
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt += 1) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS[attempt - 1]));
+      try {
+        const response = await fetch(url, { headers: this.authHeaders(), signal: AbortSignal.timeout(60_000) });
+        if (response.status === 401 && !loggedIn) {
+          await response.body?.cancel().catch(() => undefined);
+          await this.login();
+          loggedIn = true;
+          attempt -= 1;
+          continue;
+        }
+        if (response.status === 401 || response.status === 403) {
+          const body = await response.clone().json().catch(() => ({})) as { error?: string };
+          throw new CatscoAuthError(body.error ?? `CatsCompany download authorization failed: HTTP ${response.status}`, response.status);
+        }
+        const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+        if (retryable && attempt < RETRY_DELAYS.length) {
+          lastError = new LoopError(`Finding download failed: HTTP ${response.status}`, "download_failed", true, response.status);
+          await response.body?.cancel().catch(() => undefined);
+          continue;
+        }
+        return response;
+      } catch (error) {
+        if (error instanceof CatscoAuthError || (error instanceof LoopError && !error.retryable)) throw error;
+        lastError = error;
+        if (attempt >= RETRY_DELAYS.length) break;
+      }
+    }
+    throw new LoopError(`Finding download failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`, "download_failed", true);
   }
 
   private async request(path: string, options: RequestOptions = {}): Promise<unknown> {
@@ -197,7 +232,11 @@ export class CatscoClient implements ICatscoClient {
       try {
         const headers = new Headers(options.headers);
         for (const [key, value] of Object.entries(this.authHeaders())) headers.set(key, String(value));
-        const response = await fetch(new URL(path, this.config.catscoBaseUrl), { ...options, headers });
+        const response = await fetch(new URL(path, this.config.catscoBaseUrl), {
+          ...options,
+          headers,
+          signal: options.signal ?? AbortSignal.timeout(60_000),
+        });
         if (response.status === 401 && !loggedIn && options.allowLogin !== false) {
           await this.login();
           loggedIn = true;

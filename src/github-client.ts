@@ -19,6 +19,9 @@ interface GhPull {
   baseRefName: string;
   headRefName: string;
   headRefOid: string;
+  author?: { login?: string };
+  headRepository?: { nameWithOwner?: string };
+  headRepositoryOwner?: { login?: string };
 }
 
 export class GithubClient implements IGithubClient {
@@ -42,7 +45,7 @@ export class GithubClient implements IGithubClient {
   async findPullRequest(repo: string, branch: string, base: string): Promise<PullRequestState | undefined> {
     const output = await this.gh([
       "pr", "list", "--repo", repo, "--state", "open", "--head", branch,
-      "--json", "number,url,state,baseRefName,headRefName,headRefOid",
+      "--json", "number,url,state,baseRefName,headRefName,headRefOid,author,headRepository,headRepositoryOwner",
     ]);
     const pulls = JSON.parse(output) as GhPull[];
     const pull = pulls.find((candidate) => candidate.baseRefName === base && candidate.headRefName === branch);
@@ -54,6 +57,9 @@ export class GithubClient implements IGithubClient {
       base_ref: pull.baseRefName,
       head_ref: pull.headRefName,
       head_sha: pull.headRefOid,
+      author_login: pull.author?.login ?? "",
+      head_repository: pull.headRepository?.nameWithOwner ?? "",
+      head_repository_owner: pull.headRepositoryOwner?.login ?? "",
       first_seen_at: new Date().toISOString(),
     };
   }

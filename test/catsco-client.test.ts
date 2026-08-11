@@ -75,6 +75,47 @@ test("403 is terminal auth failure and does not attempt login", async () => {
   }
 });
 
+test("Finding download refreshes an expired token and retries the same URL", async () => {
+  let loginCalls = 0;
+  let downloadCalls = 0;
+  const server = createServer(async (request, response) => {
+    if (request.url === "/api/auth/login") {
+      loginCalls += 1;
+      response.setHeader("content-type", "application/json");
+      response.end('{"token":"fresh"}');
+      return;
+    }
+    if (request.url === "/uploads/files/finding.zip") {
+      downloadCalls += 1;
+      if (request.headers.authorization !== "Bearer fresh") {
+        response.statusCode = 401;
+        response.setHeader("content-type", "application/json");
+        response.end('{"error":"expired"}');
+        return;
+      }
+      response.end("zip-bytes");
+      return;
+    }
+    response.statusCode = 404;
+    response.end("{}");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const root = await mkdtemp(join(tmpdir(), "catsloop-download-auth-"));
+  try {
+    const base = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+    const client = new CatscoClient(config(base, root), join(root, "token.json"));
+    const destination = join(root, "finding.zip");
+    const downloaded = await client.download(`${base}/uploads/files/finding.zip`, destination, 1024);
+    assert.equal(loginCalls, 1);
+    assert.equal(downloadCalls, 2);
+    assert.equal(downloaded.size, 9);
+    assert.equal(await readFile(destination, "utf8"), "zip-bytes");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("stable client_msg_id remains unchanged across a duplicate send", async () => {
   const seen = new Map<string, number>();
   let next = 1;

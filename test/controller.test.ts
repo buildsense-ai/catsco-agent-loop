@@ -55,7 +55,7 @@ async function advanceToDeveloper(ctx: Awaited<ReturnType<typeof setup>>): Promi
 
 async function advanceToReview(ctx: Awaited<ReturnType<typeof setup>>): Promise<LoopRun> {
   let run = await advanceToDeveloper(ctx);
-  ctx.github.pr = { number: 42, url: "https://github.com/acme/widget/pull/42", state: "OPEN", base_ref: "main", head_ref: run.branch, head_sha: "abc123", first_seen_at: new Date().toISOString() };
+  ctx.github.pr = { number: 42, url: "https://github.com/acme/widget/pull/42", state: "OPEN", base_ref: "main", head_ref: run.branch, head_sha: "abc123", author_login: "developer", head_repository: "acme/widget", head_repository_owner: "acme", first_seen_at: new Date().toISOString() };
   ctx.catsco.agentReply(run.developer.topic_id!, "PR ready");
   ctx.catsco.finish(run.developer.topic_id!);
   await ctx.controller.tick();
@@ -69,7 +69,7 @@ test("normal ZIP to PR to CI to current-SHA approval completes without merge", a
   let run = await advanceToDeveloper(ctx);
   const mondayTopic = run.monday.topic_id;
   const developerTopic = run.developer.topic_id;
-  ctx.github.pr = { number: 42, url: "https://github.com/acme/widget/pull/42", state: "OPEN", base_ref: "main", head_ref: run.branch, head_sha: "abc123", first_seen_at: new Date().toISOString() };
+  ctx.github.pr = { number: 42, url: "https://github.com/acme/widget/pull/42", state: "OPEN", base_ref: "main", head_ref: run.branch, head_sha: "abc123", author_login: "developer", head_repository: "acme/widget", head_repository_owner: "acme", first_seen_at: new Date().toISOString() };
   ctx.catsco.agentReply(developerTopic!, "PR ready");
   ctx.catsco.finish(developerTopic!);
   await ctx.controller.tick();
@@ -91,7 +91,7 @@ test("normal ZIP to PR to CI to current-SHA approval completes without merge", a
 test("old approval is invalid after a new Head SHA", async () => {
   const ctx = await setup();
   let run = await advanceToDeveloper(ctx);
-  ctx.github.pr = { number: 7, url: "https://github.com/acme/widget/pull/7", state: "OPEN", base_ref: "main", head_ref: run.branch, head_sha: "sha1", first_seen_at: new Date().toISOString() };
+  ctx.github.pr = { number: 7, url: "https://github.com/acme/widget/pull/7", state: "OPEN", base_ref: "main", head_ref: run.branch, head_sha: "sha1", author_login: "developer", head_repository: "acme/widget", head_repository_owner: "acme", first_seen_at: new Date().toISOString() };
   ctx.catsco.agentReply(run.developer.topic_id!, "done"); ctx.catsco.finish(run.developer.topic_id!);
   await ctx.controller.tick();
   ctx.github.ci = { sha: "sha1", state: "success", checks: [], observed_at: new Date().toISOString() };
@@ -103,6 +103,27 @@ test("old approval is invalid after a new Head SHA", async () => {
   run = await ctx.store.readRun(run.run_id);
   assert.equal(run.phase, "waiting_ci");
   assert.equal(run.pr?.head_sha, "sha2");
+});
+
+test("PR from an unexpected GitHub author is rejected mechanically", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  ctx.github.pr = {
+    number: 9,
+    url: "https://github.com/acme/widget/pull/9",
+    state: "OPEN",
+    base_ref: "main",
+    head_ref: run.branch,
+    head_sha: "foreign",
+    author_login: "someone-else",
+    head_repository: "acme/widget",
+    head_repository_owner: "acme",
+    first_seen_at: new Date().toISOString(),
+  };
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "blocked");
+  assert.match(run.terminal_reason!, /does not match configured Developer identity/);
 });
 
 test("manual message pauses controlled run and resume preserves Topic", async () => {

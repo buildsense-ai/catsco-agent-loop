@@ -61,9 +61,9 @@ export interface PullRequestState {
   base_ref: string;
   head_ref: string;
   head_sha: string;
-  author_login?: string;
-  head_repository?: string;
-  head_repository_owner?: string;
+  author_login: string;
+  head_repository: string;
+  head_repository_owner: string;
   expected_previous_sha?: string;
   first_seen_at: string;
 }

@@ -268,6 +268,10 @@ export class LoopController {
   private async reconcileDeveloper(run: LoopRun): Promise<LoopRun> {
     await this.refreshAgent(run, run.developer);
     const pull = await this.github.findPullRequest(run.repo, run.branch, run.base_branch);
+    if (pull) {
+      const identityError = this.pullIdentityError(run, pull);
+      if (identityError) return await this.block(run, identityError);
+    }
     const expected = run.pr?.expected_previous_sha;
     if (pull && (!expected || pull.head_sha !== expected)) {
       pull.first_seen_at = run.pr?.first_seen_at ?? pull.first_seen_at;
@@ -288,6 +292,8 @@ export class LoopController {
     if (!run.pr) return await this.transition(run, "developer_implementing", "developer", "an open PR", "PR state was missing; returning to Developer reconciliation.");
     const current = await this.github.findPullRequest(run.repo, run.branch, run.base_branch);
     if (!current) return await this.block(run, "Tracked PR is no longer open or no longer matches the required branch/base.");
+    const identityError = this.pullIdentityError(run, current);
+    if (identityError) return await this.block(run, identityError);
     if (current.head_sha !== run.pr.head_sha) {
       run.pr = { ...current, first_seen_at: run.pr.first_seen_at };
       run.ci = undefined;
@@ -328,6 +334,8 @@ export class LoopController {
     await this.refreshAgent(run, run.monday);
     const current = await this.github.findPullRequest(run.repo, run.branch, run.base_branch);
     if (!current) return await this.block(run, "Tracked PR is no longer open during Monday review.");
+    const identityError = this.pullIdentityError(run, current);
+    if (identityError) return await this.block(run, identityError);
     if (current.head_sha !== run.pr.head_sha) {
       run.pr = { ...current, first_seen_at: run.pr.first_seen_at };
       run.ci = undefined;
@@ -377,6 +385,16 @@ export class LoopController {
     if (item.kind === "review" && item.state?.toUpperCase() === "APPROVED") return false;
     if (item.commit_id && item.commit_id !== run.pr?.head_sha) return false;
     return !run.review_requested_at || item.created_at >= run.review_requested_at;
+  }
+
+  private pullIdentityError(run: LoopRun, pull: NonNullable<LoopRun["pr"]>): string | undefined {
+    if (pull.author_login.toLowerCase() !== run.developer_github_login.toLowerCase()) {
+      return `PR #${pull.number} author ${pull.author_login || "<unknown>"} does not match configured Developer identity ${run.developer_github_login}.`;
+    }
+    if (pull.head_repository.toLowerCase() !== run.repo.toLowerCase()) {
+      return `PR #${pull.number} head repository ${pull.head_repository || "<unknown>"} does not match controlled repository ${run.repo}.`;
+    }
+    return undefined;
   }
 
   private async refreshAgent(run: LoopRun, agent: AgentTurnState): Promise<void> {
