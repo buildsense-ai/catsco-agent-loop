@@ -120,6 +120,7 @@ export interface LoopRun {
   updated_at: string;
   last_progress_at: string;
   github_polled_at?: string;
+  github_poll_phase?: RunPhase;
   next_retry_at?: string;
   last_error?: string;
   terminal_reason?: string;

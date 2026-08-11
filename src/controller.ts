@@ -55,7 +55,19 @@ export class LoopController {
 
   async initialize(): Promise<void> {
     await mkdir(this.config.stateDir, { recursive: true, mode: 0o700 });
-    await this.catsco.validateSession();
+    try {
+      await this.catsco.validateSession();
+    } catch (error) {
+      if (error instanceof CatscoAuthError) {
+        for (const run of await this.store.listNonTerminal()) {
+          this.rememberResumePhase(run);
+          run.last_error = error.message;
+          await this.transition(run, "blocked_auth", "none", "CatsCompany authentication", error.message);
+        }
+      } else {
+        console.error("CatsCompany startup validation is degraded; API will remain available", error instanceof Error ? error.message : error);
+      }
+    }
     for (const run of await this.store.listNonTerminal()) {
       await this.store.appendEvent(run, { type: "controller_restarted", message: "Controller restarted; reconciliation is required before any resend." });
     }
@@ -65,8 +77,11 @@ export class LoopController {
     if (this.timer) return;
     const schedule = async () => {
       await this.tick().catch((error) => console.error("controller tick failed", error instanceof Error ? error.message : error));
-      const active = (await this.store.listNonTerminal()).length > 0;
-      this.timer = setTimeout(schedule, active ? Math.min(this.config.catscoPollMs, this.config.githubPollMs) : this.config.idlePollMs);
+       const active = await this.store.listNonTerminal();
+       const delay = active.length
+         ? Math.min(...active.map((run) => run.phase === "waiting_ci" ? this.config.githubPollMs : this.config.catscoPollMs))
+         : this.config.idlePollMs;
+       this.timer = setTimeout(schedule, delay);
       this.timer.unref();
     };
     this.timer = setTimeout(schedule, 0);
@@ -169,9 +184,10 @@ export class LoopController {
       const active = runs.filter((run) => run.phase !== "queued").slice(0, this.config.maxActiveRuns);
       const available = Math.max(0, this.config.maxActiveRuns - active.length);
       const selected = [...active, ...runs.filter((run) => run.phase === "queued").slice(0, available)];
-      for (const run of selected) {
-        await this.withRunLock(run.run_id, async () => await this.process(await this.store.readRun(run.run_id), false));
-      }
+      await Promise.all(selected.map(async (run) => await this.withRunLock(
+        run.run_id,
+        async () => await this.process(await this.store.readRun(run.run_id), false),
+      )));
     } finally {
       this.ticking = false;
     }
@@ -200,9 +216,9 @@ export class LoopController {
       switch (run.phase) {
         case "queued": return await this.beginMonday(run);
         case "monday_finding": return await this.reconcileMondayFinding(run);
-        case "developer_implementing": return await this.reconcileDeveloper(run);
-        case "waiting_ci": return await this.reconcileCi(run);
-        case "monday_review": return await this.reconcileMondayReview(run);
+        case "developer_implementing": return await this.reconcileDeveloper(run, forced);
+        case "waiting_ci": return await this.reconcileCi(run, forced);
+        case "monday_review": return await this.reconcileMondayReview(run, forced);
         case "recovering": return await this.performRecovery(run, forced);
         case "blocked":
         case "blocked_auth":
@@ -265,8 +281,13 @@ export class LoopController {
     return await this.recoverIfTerminal(run, run.monday, "Monday", "a downloadable ZIP containing FINDING.md and manifest.json");
   }
 
-  private async reconcileDeveloper(run: LoopRun): Promise<LoopRun> {
+  private async reconcileDeveloper(run: LoopRun, forced = false): Promise<LoopRun> {
     await this.refreshAgent(run, run.developer);
+    if (run.developer.protocol_error && run.developer.episode_started && run.developer.episode && EPISODE_TERMINAL.has(run.developer.episode.state)) {
+      return await this.block(run, run.developer.protocol_error);
+    }
+    const terminalEpisode = Boolean(run.developer.episode_started && run.developer.episode && EPISODE_TERMINAL.has(run.developer.episode.state));
+    if (!await this.beginGithubPoll(run, forced || terminalEpisode)) return run;
     const pull = await this.github.findPullRequest(run.repo, run.branch, run.base_branch);
     if (pull) {
       const identityError = this.pullIdentityError(run, pull);
@@ -281,15 +302,13 @@ export class LoopController {
       await this.progress(run, "github_delivery", `Detected PR #${pull.number} at Head ${pull.head_sha}.`, { pr: pull.number, sha: pull.head_sha });
       return await this.transition(run, "waiting_ci", "github", `CI for ${pull.head_sha}`, "Developer GitHub delivery verified mechanically.");
     }
-    if (run.developer.protocol_error && run.developer.episode_started && run.developer.episode && EPISODE_TERMINAL.has(run.developer.episode.state)) {
-      return await this.block(run, run.developer.protocol_error);
-    }
     const missing = run.pr ? `a new Head SHA on existing PR #${run.pr.number}` : `an open PR from ${run.branch} to ${run.base_branch}`;
     return await this.recoverIfTerminal(run, run.developer, "Developer", missing);
   }
 
-  private async reconcileCi(run: LoopRun): Promise<LoopRun> {
+  private async reconcileCi(run: LoopRun, forced = false): Promise<LoopRun> {
     if (!run.pr) return await this.transition(run, "developer_implementing", "developer", "an open PR", "PR state was missing; returning to Developer reconciliation.");
+    if (!await this.beginGithubPoll(run, forced)) return run;
     const current = await this.github.findPullRequest(run.repo, run.branch, run.base_branch);
     if (!current) return await this.block(run, "Tracked PR is no longer open or no longer matches the required branch/base.");
     const identityError = this.pullIdentityError(run, current);
@@ -329,9 +348,11 @@ export class LoopController {
     return await this.transition(run, "monday_review", "monday", "current-SHA approval or comment plus new Finding ZIP", `CI ${run.ci.state}; review request sent to the original Monday Topic.`);
   }
 
-  private async reconcileMondayReview(run: LoopRun): Promise<LoopRun> {
+  private async reconcileMondayReview(run: LoopRun, forced = false): Promise<LoopRun> {
     if (!run.pr) return await this.block(run, "Monday review phase has no tracked PR.");
     await this.refreshAgent(run, run.monday);
+    const terminalEpisode = Boolean(run.monday.episode_started && run.monday.episode && EPISODE_TERMINAL.has(run.monday.episode.state));
+    if (!await this.beginGithubPoll(run, forced || terminalEpisode || Boolean(run.monday.github_auth_error))) return run;
     const current = await this.github.findPullRequest(run.repo, run.branch, run.base_branch);
     if (!current) return await this.block(run, "Tracked PR is no longer open during Monday review.");
     const identityError = this.pullIdentityError(run, current);
@@ -397,11 +418,19 @@ export class LoopController {
     return undefined;
   }
 
+  private async beginGithubPoll(run: LoopRun, forced: boolean): Promise<boolean> {
+    if (!forced && run.github_poll_phase === run.phase && run.github_polled_at && Date.now() - Date.parse(run.github_polled_at) < this.config.githubPollMs) return false;
+    run.github_polled_at = now();
+    run.github_poll_phase = run.phase;
+    await this.store.writeRun(run);
+    return true;
+  }
+
   private async refreshAgent(run: LoopRun, agent: AgentTurnState): Promise<void> {
     if (!agent.topic_id) return;
     const [episode, messages] = await Promise.all([
       this.catsco.getEpisode(agent.topic_id),
-      this.catsco.getMessages(agent.topic_id, 100),
+      this.catsco.getMessagesAfter(agent.topic_id, agent.dispatch_seq ?? 0),
     ]);
     agent.episode = episode;
     agent.episode_observed_at = now();
@@ -480,6 +509,7 @@ export class LoopController {
     agent.episode = previous;
     agent.episode_started = false;
     agent.last_prompt_key = key;
+    agent.last_observed_seq = Math.max(agent.last_observed_seq ?? 0, receipt.seq_id);
     agent.protocol_error = undefined;
     agent.github_auth_error = undefined;
     run.updated_at = sentAt;
@@ -525,8 +555,10 @@ export class LoopController {
   private async detectManualMessage(run: LoopRun): Promise<boolean> {
     for (const agent of [run.monday, run.developer]) {
       if (!agent.topic_id) continue;
-      const messages = await this.catsco.getMessages(agent.topic_id, 100);
-      const manual = messages.find((message) => message.from_uid === this.config.controllerUid && !run.sent_message_ids.includes(message.id));
+      const messages = await this.catsco.getMessagesAfter(agent.topic_id, agent.last_observed_seq ?? 0);
+      const manual = messages.find((message) => message.from_uid !== agent.agent_uid && !run.sent_message_ids.includes(message.id));
+      const newest = messages.at(-1);
+      if (newest) agent.last_observed_seq = Number(newest.seq_id ?? newest.id);
       if (manual) {
         run.paused_for_manual_message = { topic_id: agent.topic_id, message_id: manual.id, detected_at: now() };
         await this.store.writeRun(run);

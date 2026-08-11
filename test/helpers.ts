@@ -19,8 +19,12 @@ export class FakeCatsco implements ICatscoClient {
   nextMessage = 10_000;
   topics = new Map<string, { agentUid: number; messages: CatscoMessage[]; files: CatscoFile[]; episode?: EpisodeStatus }>();
   fixtureZip?: string;
+  validateError?: Error;
 
-  async validateSession() { return { uid: 363, username: "controller" }; }
+  async validateSession() {
+    if (this.validateError) throw this.validateError;
+    return { uid: 363, username: "controller" };
+  }
 
   async findAgentTask(name: string, agentUid: number) {
     for (const [topicId, topic] of this.topics) {
@@ -47,6 +51,11 @@ export class FakeCatsco implements ICatscoClient {
   }
 
   async getMessages(topicId: string) { return [...(this.topics.get(topicId)?.messages ?? [])]; }
+  async getMessagesAfter(topicId: string, afterSeq: number) {
+    return [...(this.topics.get(topicId)?.messages ?? [])]
+      .filter((message) => Number(message.seq_id ?? message.id) > afterSeq)
+      .sort((a, b) => Number(a.seq_id ?? a.id) - Number(b.seq_id ?? b.id));
+  }
   async getAgentFiles(_agentUid: number, topicId: string) { return [...(this.topics.get(topicId)?.files ?? [])]; }
   async getEpisode(topicId: string) { return this.topics.get(topicId)?.episode; }
 
@@ -82,9 +91,12 @@ export class FakeGithub implements IGithubClient {
   ci: CiSummary = { sha: "", state: "pending", checks: [], observed_at: new Date().toISOString() };
   evidence: ReviewEvidence[] = [];
   validateCalls = 0;
+  findCalls = 0;
+  ciCalls = 0;
+  reviewCalls = 0;
 
   async validate() { this.validateCalls += 1; return { login: "controller" }; }
-  async findPullRequest() { return this.pr ? { ...this.pr } : undefined; }
-  async getCi(_repo: string, sha: string) { return { ...this.ci, sha }; }
-  async getReviewEvidence() { return [...this.evidence]; }
+  async findPullRequest() { this.findCalls += 1; return this.pr ? { ...this.pr } : undefined; }
+  async getCi(_repo: string, sha: string) { this.ciCalls += 1; return { ...this.ci, sha }; }
+  async getReviewEvidence() { this.reviewCalls += 1; return [...this.evidence]; }
 }

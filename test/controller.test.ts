@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import yazl from "yazl";
 import { LoopController } from "../src/controller.js";
+import { CatscoAuthError } from "../src/errors.js";
 import { RunStore } from "../src/store.js";
 import type { ControllerConfig, LoopRun } from "../src/types.js";
 import { FakeCatsco, FakeGithub } from "./helpers.js";
@@ -133,7 +134,7 @@ test("manual message pauses controlled run and resume preserves Topic", async ()
   run = await ctx.store.readRun(run.run_id);
   const topic = ctx.catsco.topics.get(run.monday.topic_id!)!;
   const id = ctx.catsco.nextMessage++;
-  topic.messages.push({ id, topic_id: run.monday.topic_id!, from_uid: 363, content: "manual intervention" });
+  topic.messages.push({ id, seq_id: id, topic_id: run.monday.topic_id!, from_uid: 999, content: "manual intervention" });
   await ctx.controller.tick();
   run = await ctx.store.readRun(run.run_id);
   assert.equal(run.phase, "blocked");
@@ -141,6 +142,30 @@ test("manual message pauses controlled run and resume preserves Topic", async ()
   run = await ctx.controller.resume(run.run_id);
   assert.equal(run.phase, "monday_finding");
   assert.equal(run.monday.topic_id, topic.messages[0]?.topic_id);
+});
+
+test("GitHub polling is throttled within a phase while CatsCompany can still refresh", async () => {
+  const ctx = await setup();
+  ctx.config.githubPollMs = 60_000;
+  const run = await advanceToDeveloper(ctx);
+  await ctx.controller.tick();
+  const firstPolls = ctx.github.findCalls;
+  await ctx.controller.tick();
+  assert.equal(ctx.github.findCalls, firstPolls);
+  const persisted = await ctx.store.readRun(run.run_id);
+  assert.ok(persisted.developer.episode_observed_at);
+});
+
+test("startup CatsCompany auth failure keeps state readable and marks active Runs blocked_auth", async () => {
+  const ctx = await setup();
+  let run = await ctx.controller.createRun({ request: "work", repo: "acme/widget" });
+  await ctx.controller.tick();
+  ctx.catsco.validateError = new CatscoAuthError("expired and login unavailable");
+  const restarted = new LoopController(ctx.config, ctx.store, ctx.catsco, ctx.github);
+  await restarted.initialize();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "blocked_auth");
+  assert.match(run.last_error!, /login unavailable/);
 });
 
 test("run.json is valid after atomic updates and events are append-only", async () => {

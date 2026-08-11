@@ -23,6 +23,7 @@ export interface ICatscoClient {
   createAgentTask(name: string, agentUid: number): Promise<{ group_id: number; topic: string }>;
   sendMessage(input: SendMessageInput): Promise<SendMessageResult>;
   getMessages(topicId: string, limit?: number): Promise<CatscoMessage[]>;
+  getMessagesAfter(topicId: string, afterSeq: number, maxMessages?: number): Promise<CatscoMessage[]>;
   getAgentFiles(agentUid: number, topicId: string): Promise<CatscoFile[]>;
   getEpisode(topicId: string): Promise<EpisodeStatus | undefined>;
   download(url: string, destination: string, maxBytes: number): Promise<{ size: number; sha256: string }>;
@@ -101,20 +102,32 @@ export class CatscoClient implements ICatscoClient {
 
   async getMessages(topicId: string, limit = 100): Promise<CatscoMessage[]> {
     const all: CatscoMessage[] = [];
-    let beforeId: number | undefined;
-    for (let page = 0; page < 20; page += 1) {
+    for (let offset = 0; all.length < limit; offset += 100) {
       const query = new URLSearchParams({ topic_id: topicId, latest: "1", limit: String(Math.min(limit, 100)) });
-      if (beforeId) query.set("before_id", String(beforeId));
-      const response = await this.request(`/api/messages?${query}`) as {
-        messages?: CatscoMessage[];
-        has_more?: boolean;
-        next_before_id?: number;
-      };
-      all.unshift(...(response.messages ?? []));
-      if (!response.has_more || !response.next_before_id || all.length >= limit) break;
-      beforeId = response.next_before_id;
+      query.set("offset", String(offset));
+      const response = await this.request(`/api/messages?${query}`) as { messages?: CatscoMessage[] };
+      const page = response.messages ?? [];
+      all.push(...page);
+      if (page.length < Math.min(limit, 100)) break;
     }
     return all.sort((a, b) => a.id - b.id).slice(-limit);
+  }
+
+  async getMessagesAfter(topicId: string, afterSeq: number, maxMessages = 2_000): Promise<CatscoMessage[]> {
+    const fresh: CatscoMessage[] = [];
+    for (let offset = 0; offset < maxMessages; offset += 100) {
+      const query = new URLSearchParams({ topic_id: topicId, latest: "1", limit: "100", offset: String(offset) });
+      const response = await this.request(`/api/messages?${query}`) as { messages?: CatscoMessage[] };
+      const page = response.messages ?? [];
+      fresh.push(...page.filter((message) => Number(message.seq_id ?? message.id) > afterSeq));
+      const crossedCursor = page.some((message) => Number(message.seq_id ?? message.id) <= afterSeq);
+      if (crossedCursor || page.length < 100) break;
+      if (offset + 100 >= maxMessages) {
+        throw new LoopError(`CatsCompany message delta exceeded ${maxMessages} records for ${topicId}`, "message_cursor_overflow");
+      }
+    }
+    return [...new Map(fresh.map((message) => [message.id, message])).values()]
+      .sort((a, b) => Number(a.seq_id ?? a.id) - Number(b.seq_id ?? b.id));
   }
 
   async getAgentFiles(agentUid: number, topicId: string): Promise<CatscoFile[]> {

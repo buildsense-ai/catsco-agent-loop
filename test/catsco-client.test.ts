@@ -147,3 +147,36 @@ test("stable client_msg_id remains unchanged across a duplicate send", async () 
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test("message cursor walks latest-page offsets instead of truncating at 100", async () => {
+  const messages = Array.from({ length: 250 }, (_, index) => ({
+    id: index + 1,
+    seq_id: index + 1,
+    topic_id: "grp_1",
+    from_uid: 553,
+    content: `message-${index + 1}`,
+  }));
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? "/", "http://localhost");
+    if (url.pathname !== "/api/messages") { response.statusCode = 404; response.end("{}"); return; }
+    const limit = Number(url.searchParams.get("limit") ?? 100);
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    const descendingWindow = [...messages].reverse().slice(offset, offset + limit).reverse();
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ messages: descendingWindow }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const root = await mkdtemp(join(tmpdir(), "catsloop-cursor-"));
+  try {
+    const cfg = config(`http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`, root);
+    cfg.catscoToken = "valid";
+    const client = new CatscoClient(cfg, join(root, "token.json"));
+    const fresh = await client.getMessagesAfter("grp_1", 50);
+    assert.equal(fresh.length, 200);
+    assert.equal(fresh[0]?.seq_id, 51);
+    assert.equal(fresh.at(-1)?.seq_id, 250);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
