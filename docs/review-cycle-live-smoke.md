@@ -1,2 +1,3 @@
 - Controller binds every review cycle to one exact pull-request Head SHA.
+- Superseded Finding ZIP evidence remains visible but cannot satisfy a later review cycle.
 - The Controller stops after current-Head approval and never merges the pull request.
