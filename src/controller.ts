@@ -160,6 +160,10 @@ export class LoopController {
       const phase = run.resume_phase ?? this.inferResumePhase(run);
       if (reviewerAuthBlocked && phase === "monday_review" && run.monday.topic_id) {
         run.monday.github_auth_error = undefined;
+        // A Finding captured before reviewer credentials were restored is only
+        // a partial delivery from the failed review attempt. Do not pair it
+        // with a later review from the restored identity.
+        run.pending_review_finding = undefined;
         run.monday_attempt += 1;
         await this.dispatch(run, run.monday, `monday-auth-resume-${run.monday_attempt}-${run.pr?.head_sha.slice(0, 8) ?? "nohead"}`, {
           topicId: run.monday.topic_id,

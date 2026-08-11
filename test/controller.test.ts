@@ -274,11 +274,14 @@ test("missing required Monday reviewer identity blocks GitHub auth without futil
   assert.match(run.last_error!, /monday-reviewer/);
   const topic = run.monday.topic_id!;
   const priorDispatch = run.monday.dispatch_seq;
+  run.pending_review_finding = run.latest_finding;
+  await ctx.store.writeRun(run);
   run = await ctx.controller.resume(run.run_id);
   assert.equal(run.phase, "monday_review");
   assert.equal(run.monday.topic_id, topic);
   assert.ok(run.monday.dispatch_seq! > priorDispatch!);
   assert.equal(run.monday.github_auth_error, undefined);
+  assert.equal(run.pending_review_finding, undefined);
   assert.match(String(ctx.catsco.topics.get(topic)!.messages.at(-1)?.content), /monday-reviewer/);
   ctx.github.evidence.push({ id: "review:restored", kind: "review", author: "monday-reviewer", state: "APPROVED", commit_id: "abc123", created_at: new Date().toISOString() });
   await ctx.controller.tick();
