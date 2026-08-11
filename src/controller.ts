@@ -153,6 +153,10 @@ export class LoopController {
       run.paused_for_manual_message = undefined;
       run.next_retry_at = undefined;
       run.recovery_attempt = 0;
+      // An explicit operator resume starts a fresh recovery window. Without
+      // this, an old blocked Run can immediately trip the global stage timeout
+      // before the resumed Agent Episode has a chance to start.
+      run.last_progress_at = now();
       const phase = run.resume_phase ?? this.inferResumePhase(run);
       if (reviewerAuthBlocked && phase === "monday_review" && run.monday.topic_id) {
         run.monday.github_auth_error = undefined;

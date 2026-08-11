@@ -139,9 +139,16 @@ test("manual message pauses controlled run and resume preserves Topic", async ()
   run = await ctx.store.readRun(run.run_id);
   assert.equal(run.phase, "blocked");
   assert.equal(run.paused_for_manual_message?.message_id, id);
+  const staleProgress = new Date(Date.now() - ctx.config.stageTimeoutMs - 1).toISOString();
+  run.last_progress_at = staleProgress;
+  await ctx.store.writeRun(run);
   run = await ctx.controller.resume(run.run_id);
   assert.equal(run.phase, "monday_finding");
   assert.equal(run.monday.topic_id, topic.messages[0]?.topic_id);
+  assert.ok(Date.parse(run.last_progress_at) > Date.parse(staleProgress));
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.notEqual(run.phase, "blocked");
 });
 
 test("GitHub polling is throttled within a phase while CatsCompany can still refresh", async () => {
