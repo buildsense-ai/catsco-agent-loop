@@ -32,6 +32,12 @@ export interface AgentTurnState {
   previous_episode_run_id?: string;
   episode?: EpisodeStatus;
   episode_observed_at?: string;
+  turn_started_at?: string;
+  last_message_at?: string;
+  last_episode_change_at?: string;
+  last_turn_started_at?: string;
+  last_turn_ended_at?: string;
+  last_turn_duration_ms?: number;
   episode_started: boolean;
   last_agent_seq?: number;
   last_observed_seq?: number;
@@ -143,6 +149,7 @@ export interface LoopRun {
   paused_for_manual_message?: { topic_id: string; message_id: number; detected_at: string };
   created_at: string;
   updated_at: string;
+  phase_started_at?: string;
   activity_state: ActivityState;
   last_activity_at: string;
   last_progress_at: string;

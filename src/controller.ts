@@ -128,6 +128,7 @@ export class LoopController {
       receipts: {},
       created_at: created,
       updated_at: created,
+      phase_started_at: created,
       activity_state: "quiet",
       last_activity_at: created,
       last_progress_at: created,
@@ -557,10 +558,12 @@ export class LoopController {
       || (previousEpisode?.updated_at ?? "") !== (episode?.updated_at ?? "");
     agent.episode = episode;
     agent.episode_observed_at = observedAt;
+    if (episodeChanged) agent.last_episode_change_at = observedAt;
     const responses = messages.filter((message) => message.from_uid === agent.agent_uid);
     const response = responses.at(-1);
     if (response) {
       agent.last_agent_seq = Number(response.seq_id ?? response.id);
+      agent.last_message_at = observedAt;
     }
     const directResponse = responses.filter((message) => !message.content_blocks?.some((block) => block.type === "tool_use" || block.type === "tool_result")).at(-1);
     if (directResponse) {
@@ -662,6 +665,7 @@ export class LoopController {
     agent.episode = previous;
     agent.episode_started = false;
     agent.last_prompt_key = key;
+    agent.turn_started_at = sentAt;
     agent.last_observed_seq = Math.max(agent.last_observed_seq ?? 0, receipt.seq_id);
     agent.protocol_error = undefined;
     agent.github_auth_error = undefined;
@@ -805,10 +809,25 @@ export class LoopController {
 
   private async transition(run: LoopRun, phase: RunPhase, actor: LoopRun["active_actor"], waitingFor: string, message: string): Promise<LoopRun> {
     const previous = run.phase;
+    const changedAt = now();
+    if (previous !== phase) {
+      const previousAgent = previous === "monday_finding" || previous === "monday_review"
+        ? run.monday
+        : previous === "developer_implementing"
+          ? run.developer
+          : undefined;
+      if (previousAgent?.turn_started_at) {
+        previousAgent.last_turn_started_at = previousAgent.turn_started_at;
+        previousAgent.last_turn_ended_at = changedAt;
+        previousAgent.last_turn_duration_ms = Math.max(0, Date.parse(changedAt) - Date.parse(previousAgent.turn_started_at));
+        previousAgent.turn_started_at = undefined;
+      }
+      run.phase_started_at = changedAt;
+    }
     run.phase = phase;
     run.active_actor = actor;
     run.waiting_for = waitingFor;
-    run.updated_at = now();
+    run.updated_at = changedAt;
     run.activity_state = computeActivityState(run, Date.parse(run.updated_at), this.config.activityStallMs);
     await this.store.writeRun(run);
     await this.store.appendEvent(run, { type: "phase_changed", message, data: { from: previous, to: phase, waiting_for: waitingFor } });

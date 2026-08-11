@@ -124,11 +124,13 @@ test("API requires operator token, enforces exact CORS origin, and discloses Run
     assert.equal(listed.runs[0]?.activity_state, "quiet");
     assert.ok(listed.runs[0]?.last_activity_at);
     assert.ok(listed.runs[0]?.last_progress_at);
+    assert.ok(listed.runs[0]?.phase_started_at);
     const detail = await fetch(`${base}/api/runs/run_api_fields`, { headers });
     const body = await detail.json() as LoopRun;
     assert.equal(body.activity_state, "quiet");
     assert.ok(body.last_activity_at);
     assert.ok(body.last_progress_at);
+    assert.ok(body.phase_started_at);
     const denied = await fetch(`${base}/api/runs`, { headers: { authorization: "Bearer secret", origin: "https://evil.example" } });
     assert.equal(denied.status, 403);
   } finally {

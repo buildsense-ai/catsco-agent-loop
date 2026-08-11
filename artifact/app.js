@@ -188,16 +188,92 @@ function waitingText(run) {
   return "正在核对最新状态";
 }
 
-function renderProgress(run) {
-  const labels = ["需求", "调查", "开发", "CI", "复核"];
-  const current = stageIndex(run);
-  const progress = create("div", "task-progress");
-  labels.forEach((label, index) => {
-    const step = create("span", `phase-step${index < current ? " done" : ""}${index === current && current < 5 ? " current" : ""}`);
-    step.append(create("i", "", index < current || current === 5 ? "✓" : ""), create("span", "", label));
-    progress.append(step);
-  });
-  return progress;
+function formatDurationMs(value) {
+  if (!Number.isFinite(value)) return "—";
+  const seconds = Math.max(0, Math.floor(value / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}` : `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+}
+
+function activeRole(run, role) {
+  const phase = effectivePhase(run);
+  return role === "reviewer"
+    ? phase === "monday_finding" || phase === "monday_review"
+    : phase === "developer_implementing";
+}
+
+function latestTimestamp(...values) {
+  const times = values.filter(Boolean).map((value) => Date.parse(value)).filter(Number.isFinite);
+  return times.length ? new Date(Math.max(...times)).toISOString() : undefined;
+}
+
+function roleState(run, agent, role) {
+  const active = activeRole(run, role);
+  const episode = agent?.episode;
+  const interrupted = active && ["failed", "cancelled", "stale"].includes(episode?.state);
+  const start = active ? agent?.turn_started_at || run.phase_started_at : undefined;
+  const lastMessage = agent?.last_message_at;
+  const reference = latestTimestamp(lastMessage, agent?.last_episode_change_at, start);
+  const idleMs = reference ? Date.now() - Date.parse(reference) : 0;
+  const stalled = active && !interrupted && Number.isFinite(idleMs) && idleMs >= 5 * 60_000;
+  let status = "尚未开始";
+  if (interrupted) status = "本轮已中断";
+  else if (stalled) status = `${Math.floor(idleMs / 60_000)} 分钟无新活动`;
+  else if (active && episode?.state === "running") status = "正在运行";
+  else if (active && episode?.state === "waiting") status = "正在等待";
+  else if (active && episode?.state === "completed") status = "会话已结束，等待核对";
+  else if (active) status = "已经派发，等待响应";
+  else if (agent?.last_turn_ended_at) status = "上一轮已交接";
+  const timing = active && start
+    ? { label: "本轮", start }
+    : agent?.last_turn_duration_ms !== undefined
+      ? { label: "上一轮", value: formatDurationMs(agent.last_turn_duration_ms) }
+      : { label: "尚无耗时", value: "—" };
+  const message = lastMessage ? `最近消息 ${age(lastMessage)}` : active ? "本轮尚无回复" : "没有最近消息记录";
+  return { active, interrupted, stalled, status, timing, message };
+}
+
+function renderRoleNode(run, role, title, count) {
+  const agent = role === "reviewer" ? run.monday : run.developer;
+  const info = roleState(run, agent, role);
+  const node = create("div", `cycle-node ${role}${info.active ? " current" : ""}${info.stalled ? " stalled" : ""}${info.interrupted ? " interrupted" : ""}`);
+  const heading = create("div", "cycle-node-head");
+  heading.append(create("b", "", title), create("span", "", count > 0 ? `第 ${count} 次` : "尚未开始"));
+  const time = create("strong", "role-duration", info.timing.value || durationText(info.timing.start));
+  if (info.timing.start) {
+    time.classList.add("live-duration");
+    time.dataset.start = info.timing.start;
+    time.dataset.prefix = `${info.timing.label} `;
+    time.textContent = `${info.timing.label} ${durationText(info.timing.start)}`;
+  } else {
+    time.textContent = `${info.timing.label} ${info.timing.value}`;
+  }
+  node.append(heading, create("span", "role-status", info.status), time, create("small", "", info.message));
+  return node;
+}
+
+function renderLoopPanel(run) {
+  const panel = create("div", "loop-panel");
+  const round = (run.iteration ?? 0) + 1;
+  const reviewCount = run.review_cycle?.cycle || run.review_cycles?.length || 0;
+  const badge = create("div", "loop-badge", `第 ${round} 轮${reviewCount ? ` · 第 ${reviewCount} 次复核` : " · 尚未复核"}`);
+  const track = create("div", "cycle-track");
+  track.append(renderRoleNode(run, "reviewer", "审查者", run.monday_attempt));
+  track.append(create("span", "forward-arrow", "→"));
+  track.append(renderRoleNode(run, "developer", "开发者", run.developer_attempt));
+  track.append(create("span", "forward-arrow", "→"));
+  const ciCurrent = effectivePhase(run) === "waiting_ci";
+  const ci = create("div", `ci-node${ciCurrent ? " current" : ""}`);
+  const ciTime = ciCurrent ? durationText(run.phase_started_at) : "";
+  ci.append(create("b", "", "CI"), create("span", "", ciLabels[run.ci?.state] || "尚未开始"), create("small", "", ciCurrent ? `本轮 ${ciTime}` : run.ci?.observed_at ? `更新于 ${age(run.ci.observed_at)}` : "等待提交"));
+  track.append(ci);
+  const back = create("div", "cycle-return");
+  back.append(create("i", "", "↖"), create("span", "", "新提交返回审查者，进入下一次复核"));
+  track.append(back);
+  panel.append(badge, track);
+  return panel;
 }
 
 function episodeText(agent) {
@@ -398,17 +474,20 @@ function renderTask(run, index) {
   const number = create("span", "task-number", String(index + 1).padStart(2, "0"));
   const main = create("div", "task-main");
   const cycle = run.review_cycle?.cycle || run.review_cycles?.length || 0;
+  const round = (run.iteration ?? 0) + 1;
   main.append(create("h2", "", taskTitle(run.request)));
   const meta = create("p");
-  meta.append(create("b", "", run.repo), create("span", "", "·"), document.createTextNode(`第 ${Math.max(1, run.iteration || 1)} 轮${cycle ? ` · 第 ${cycle} 次复核` : ""}`));
+  meta.append(create("b", "", run.repo), create("span", "", "·"), document.createTextNode(`第 ${round} 轮${cycle ? ` · 第 ${cycle} 次复核` : " · 尚未复核"}`));
   main.append(meta);
   const status = create("div", "task-state");
   const end = terminalPhases.has(run.phase) ? run.updated_at : "";
-  const timer = create("time", "task-timer", durationText(run.created_at, end));
+  const timer = create("time", "task-timer live-duration", durationText(run.created_at, end));
   timer.dataset.start = run.created_at;
   if (end) timer.dataset.end = end;
-  status.append(create("strong", "", actorStatus(run)), create("span", "", waitingText(run)), timer);
-  summary.append(number, main, renderProgress(run), status, create("span", "task-chevron", "⌄"));
+  timer.dataset.prefix = "总计 ";
+  timer.textContent = `总计 ${durationText(run.created_at, end)}`;
+  status.append(create("strong", "", actorStatus(run)), create("span", "", terminalPhases.has(run.phase) ? "处理结束" : `最近活动 ${age(run.last_activity_at)}`), timer);
+  summary.append(number, main, renderLoopPanel(run), status, create("span", "task-chevron", "⌄"));
   summary.addEventListener("click", async () => {
     if (state.expanded.has(run.run_id)) state.expanded.delete(run.run_id);
     else state.expanded.add(run.run_id);
@@ -604,8 +683,8 @@ $("newRunForm").addEventListener("submit", async (event) => {
 });
 
 setInterval(() => {
-  document.querySelectorAll(".task-timer").forEach((node) => {
-    node.textContent = durationText(node.dataset.start, node.dataset.end || "");
+  document.querySelectorAll(".live-duration").forEach((node) => {
+    node.textContent = `${node.dataset.prefix || ""}${durationText(node.dataset.start, node.dataset.end || "")}`;
   });
 }, 1_000);
 setInterval(() => refresh({ silent: true }), 5_000);
