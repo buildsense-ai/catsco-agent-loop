@@ -57,6 +57,48 @@ export class RunStore {
     return run;
   }
 
+  /**
+   * Persist fields introduced after the original run schema was deployed.
+   * This must run during Controller initialization, before the API and
+   * scheduler start, so no stale read snapshot can race a live Run update.
+   */
+  async migrateLegacyRuns(): Promise<string[]> {
+    await mkdir(this.root, { recursive: true, mode: 0o700 });
+    const entries = await readdir(this.root, { withFileTypes: true });
+    const migrated: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith("run_")) continue;
+      try {
+        const path = join(this.runDir(entry.name), "run.json");
+        const run = JSON.parse(await readFile(path, "utf8")) as LoopRun;
+        let changed = false;
+        if (!run.last_progress_at) {
+          run.last_progress_at = run.updated_at || run.created_at;
+          changed = true;
+        }
+        if (!run.last_activity_at) {
+          run.last_activity_at = run.last_progress_at;
+          changed = true;
+        }
+        if (!run.activity_state) {
+          run.activity_state = computeActivityState(run, Date.now(), this.activityStallMs);
+          changed = true;
+        }
+        if (!run.review_progress_evidence_ids) {
+          run.review_progress_evidence_ids = [];
+          changed = true;
+        }
+        if (!changed) continue;
+        await this.writeRun(run);
+        migrated.push(run.run_id);
+      } catch {
+        // Preserve the existing tolerant store behavior: one malformed Run
+        // must not hide healthy Runs or prevent the operator API from starting.
+      }
+    }
+    return migrated;
+  }
+
   async listRuns(): Promise<LoopRun[]> {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     const names = await readdir(this.root, { withFileTypes: true });

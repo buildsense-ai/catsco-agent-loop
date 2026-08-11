@@ -56,6 +56,7 @@ export class LoopController {
 
   async initialize(): Promise<void> {
     await mkdir(this.config.stateDir, { recursive: true, mode: 0o700 });
+    await this.store.migrateLegacyRuns();
     try {
       await this.catsco.validateSession();
     } catch (error) {

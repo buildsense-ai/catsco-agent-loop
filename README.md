@@ -57,6 +57,7 @@ loopctl cancel --run run_...
 
 State is stored as atomic `run.json`, append-only `events.jsonl`, `request.md`, and validated ZIP copies below the configured run directory. On restart the scheduler reconciles external side effects before any resend.
 Episode state is a timestamped observation; `active_actor` is authoritative for who the Controller is currently driving.
+Before the HTTP API and scheduler start, the Controller performs an idempotent migration that adds missing timing disclosure fields to legacy `run.json` files. Runtime GET/read paths remain side-effect free.
 
 ## Run timing
 
