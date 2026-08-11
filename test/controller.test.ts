@@ -262,6 +262,19 @@ test("protocol names inside ordinary tool output do not misclassify a direct Dev
   assert.equal(run.developer.protocol_error, undefined);
 });
 
+test("GitHub auth marker inside Monday tool transcript is not a blocking delivery", async () => {
+  const ctx = await setup();
+  let run = await advanceToReview(ctx);
+  ctx.catsco.agentReply(
+    run.monday.topic_id!,
+    "Command completed\nstatus: succeeded\ncommand: if missing: print('LOOP_BLOCKED_GITHUB_AUTH reviewer=monday-reviewer')\nstdout:\nAPPROVED",
+  );
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.notEqual(run.phase, "blocked_github_auth");
+  assert.equal(run.monday.github_auth_error, undefined);
+});
+
 test("missing required Monday reviewer identity blocks GitHub auth without futile recovery", async () => {
   const ctx = await setup();
   let run = await advanceToReview(ctx);

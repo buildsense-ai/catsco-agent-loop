@@ -453,9 +453,11 @@ export class LoopController {
       }
       if (agent === run.monday) {
         const marker = `LOOP_BLOCKED_GITHUB_AUTH reviewer=${run.monday_github_login}`;
+        const exactMarker = text.split(/\r?\n/).some((line) => line.trim() === marker);
+        const directAgentDelivery = !/^Command (?:completed|failed|timed out)\b/i.test(text.trim());
         const explicitUnavailable = text.includes(run.monday_github_login)
           && /(?:credential|凭据|身份)[\s\S]{0,120}(?:unavailable|missing|未提供|不可用|无法)/i.test(text);
-        if (text.includes(marker) || explicitUnavailable) {
+        if (exactMarker || (directAgentDelivery && explicitUnavailable)) {
           agent.github_auth_error = `Required Monday GitHub reviewer identity ${run.monday_github_login} is unavailable; Run and PR were preserved for operator recovery.`;
         }
       }
