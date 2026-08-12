@@ -377,6 +377,28 @@ test("strict execute_attempt worker refusal blocks immediately instead of retryi
   assert.equal(run.recovery_attempt, 0);
 });
 
+test("operator resume retries a stale strict-worker refusal with the direct-task contract", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  const topic = run.developer.topic_id!;
+  const previousDispatch = run.developer.dispatch_seq!;
+  ctx.catsco.agentReply(topic, "Missing LOOP_WORKTREE_CONTRACT_V1, workspaceLease and targetTopicId for execute_attempt; cannot create or push the PR.");
+  ctx.catsco.finish(topic);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "blocked");
+
+  run = await ctx.controller.resume(run.run_id);
+  assert.equal(run.phase, "developer_implementing");
+  assert.equal(run.developer.topic_id, topic);
+  assert.equal(run.developer.protocol_error, undefined);
+  assert.ok(run.developer.dispatch_seq! > previousDispatch);
+  const messages = await ctx.catsco.getMessagesAfter(topic, previousDispatch);
+  const resumed = messages.find((message) => message.from_uid !== run.developer.agent_uid);
+  assert.match(String(resumed?.content ?? ""), /direct CatsCompany Agent Task/i);
+  assert.match(String(resumed?.content ?? ""), /do not invoke the legacy loopctl-worker/i);
+});
+
 test("protocol names inside ordinary tool output do not misclassify a direct Developer", async () => {
   const ctx = await setup();
   let run = await advanceToDeveloper(ctx);
