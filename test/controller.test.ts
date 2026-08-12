@@ -465,6 +465,7 @@ test("recovery message keys remain unique after partial mechanical progress rese
   assert.notEqual(run.monday.last_prompt_key, firstKey);
   const controllerMessages = ctx.catsco.topics.get(topic)!.messages.filter((message) => message.from_uid === 363);
   assert.equal(new Set(controllerMessages.map((message) => message.client_msg_id)).size, controllerMessages.length);
+  assert.ok(controllerMessages.every((message) => (message.metadata?.mentions as string[] | undefined)?.[0] === "usr553"));
 });
 
 test("running Episode is not blocked by mechanical timeout and inactivity only reports suspected_stall", async () => {

@@ -698,6 +698,7 @@ export class LoopController {
     if (existing) return;
     const previous = agent.topic_id ? await this.catsco.getEpisode(agent.topic_id) : undefined;
     input.clientMsgId = key;
+    input.targetAgentUid = agent.agent_uid;
     const receipt = await this.catsco.sendMessage(input);
     const sentAt = now();
     run.receipts[key] = {

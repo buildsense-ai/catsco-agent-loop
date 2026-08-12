@@ -212,6 +212,7 @@ export interface SendMessageInput {
   topicId: string;
   clientMsgId: string;
   text: string;
+  targetAgentUid?: number;
   files?: Array<{ name: string; url: string; fileKey?: string; mimeType?: string; size?: number }>;
 }
 

@@ -118,13 +118,15 @@ test("Finding download refreshes an expired token and retries the same URL", asy
 
 test("stable client_msg_id remains unchanged across a duplicate send", async () => {
   const seen = new Map<string, number>();
+  const requestBodies: Array<{ client_msg_id: string; topic_id: string; mentions?: string[] }> = [];
   let next = 1;
   const server = createServer(async (request, response) => {
     response.setHeader("content-type", "application/json");
     if (request.url !== "/api/messages/send") { response.end('{"uid":363}'); return; }
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
-    const body = JSON.parse(Buffer.concat(chunks).toString()) as { client_msg_id: string; topic_id: string };
+    const body = JSON.parse(Buffer.concat(chunks).toString()) as { client_msg_id: string; topic_id: string; mentions?: string[] };
+    requestBodies.push(body);
     const duplicate = seen.has(body.client_msg_id);
     const id = seen.get(body.client_msg_id) ?? next++;
     seen.set(body.client_msg_id, id);
@@ -137,12 +139,13 @@ test("stable client_msg_id remains unchanged across a duplicate send", async () 
     const cfg = config(`http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`, root);
     cfg.catscoToken = "valid";
     const client = new CatscoClient(cfg, join(root, "token.json"));
-    const input = { topicId: "grp_1", clientMsgId: "run_x:phase:0:action", text: "hello" };
+    const input = { topicId: "grp_1", clientMsgId: "run_x:phase:0:action", text: "hello", targetAgentUid: 553 };
     const first = await client.sendMessage(input);
     const second = await client.sendMessage(input);
     assert.equal(first.id, second.id);
     assert.equal(second.duplicate, true);
     assert.equal(seen.size, 1);
+    assert.deepEqual(requestBodies.map((body) => body.mentions), [["usr553"], ["usr553"]]);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
