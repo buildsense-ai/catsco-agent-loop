@@ -89,7 +89,7 @@ POST /api/runs/:id/reconcile
 POST /api/runs/:id/cancel
 ```
 
-The static operator console is in `artifact/`. It displays existing Runs publicly and does not create them. It derives the Controller endpoint from the Artifact host, so ordinary viewing needs neither configuration nor credentials. If an operator invokes pause/resume/reconcile/cancel, the token is requested at that point and held only in `sessionStorage`. Saturday's thin semantic entrypoint is packaged in `skills/start-agent-loop/`.
+The static operator console is in `artifact/`. It displays existing Runs publicly and does not create them. It derives the Controller endpoint from the Artifact host, so ordinary viewing needs neither configuration nor credentials. A soft pause from the configured Artifact Origin is also public; resume/reconcile/cancel request the operator token and hold it only in `sessionStorage`. Saturday's thin semantic entrypoint is packaged in `skills/start-agent-loop/`.
 
 ## Validation
 

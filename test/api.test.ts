@@ -140,7 +140,7 @@ test("API exposes Run reads publicly, protects writes, enforces exact CORS origi
   }
 });
 
-test("API forwards idempotency keys and exposes soft pause", async () => {
+test("API forwards idempotency keys and exposes soft pause to the trusted Artifact only", async () => {
   const root = await mkdtemp(join(tmpdir(), "catsloop-api-actions-"));
   const store = new RunStore(root);
   const run = runFixture();
@@ -159,8 +159,11 @@ test("API forwards idempotency keys and exposes soft pause", async () => {
   const headers = { authorization: "Bearer secret", "content-type": "application/json", "idempotency-key": "cats-message-42" };
   try {
     assert.equal((await fetch(`${base}/api/runs`, { method: "POST", headers, body: JSON.stringify({ request: "work", repo: "acme/widget" }) })).status, 201);
+    assert.equal((await fetch(`${base}/api/runs/${run.run_id}/pause`, { method: "POST" })).status, 401);
+    assert.equal((await fetch(`${base}/api/runs/${run.run_id}/pause`, { method: "POST", headers: { origin: "https://evil.example" } })).status, 403);
+    assert.equal((await fetch(`${base}/api/runs/${run.run_id}/pause`, { method: "POST", headers: { origin: "https://artifact.example:19991" } })).status, 200);
     assert.equal((await fetch(`${base}/api/runs/${run.run_id}/pause`, { method: "POST", headers: { authorization: "Bearer secret" } })).status, 200);
-    assert.deepEqual(calls, [{ kind: "create", value: "cats-message-42" }, { kind: "pause", value: run.run_id }]);
+    assert.deepEqual(calls, [{ kind: "create", value: "cats-message-42" }, { kind: "pause", value: run.run_id }, { kind: "pause", value: run.run_id }]);
   } finally {
     await api.close();
   }

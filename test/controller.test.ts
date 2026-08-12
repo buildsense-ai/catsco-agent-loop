@@ -525,6 +525,20 @@ test("controlled-Agent message and Episode changes advance activity only once pe
   assert.equal(run.activity_state, "quiet");
 });
 
+test("Developer direct-task prompt rejects the legacy execute_attempt worker contract", async () => {
+  const ctx = await setup();
+  let run = await ctx.controller.createRun({ request: "work", repo: "acme/widget" });
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  ctx.catsco.addFinding(run.monday.topic_id!);
+  ctx.catsco.finish(run.monday.topic_id!);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  const message = ctx.catsco.topics.get(run.developer.topic_id!)!.messages.at(-1)!;
+  assert.match(String(message.content), /Do not invoke the legacy loopctl-worker Skill/);
+  assert.match(String(message.content), /complete work contract/);
+});
+
 test("operator soft pause sends no message and resume continues the same Topic", async () => {
   const ctx = await setup();
   let run = await ctx.controller.createRun({ request: "work", repo: "acme/widget" });
