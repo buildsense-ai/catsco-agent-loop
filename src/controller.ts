@@ -195,6 +195,43 @@ export class LoopController {
     });
   }
 
+  async reassignDeveloper(runId: string, agentUid: number): Promise<LoopRun> {
+    return await this.withRunLock(runId, async () => {
+      const run = await this.store.readRun(runId);
+      if (!["paused", "blocked", "blocked_auth", "blocked_github_auth"].includes(run.phase)) {
+        throw new LoopError("Developer can only be reassigned while the Run is paused or blocked", "developer_reassignment", false, 409);
+      }
+      if (run.pr) throw new LoopError("Developer cannot be reassigned after a PR has been detected", "developer_reassignment", false, 409);
+      if (!run.latest_finding) throw new LoopError("Developer cannot be reassigned before the initial Finding ZIP", "developer_reassignment", false, 409);
+      if (!Number.isSafeInteger(agentUid) || agentUid <= 0) throw new LoopError("agent_uid must be a positive integer", "developer_reassignment", false, 400);
+      if (agentUid === run.developer.agent_uid) return run;
+
+      const previous = { agent_uid: run.developer.agent_uid, topic_id: run.developer.topic_id };
+      const taskName = `Loop ${run.run_id} 路 Developer`;
+      const task = await this.catsco.findAgentTask(taskName, agentUid)
+        ?? await this.catsco.createAgentTask(taskName, agentUid);
+      run.developer = { agent_uid: agentUid, topic_id: task.topic, group_id: task.group_id, episode_started: false };
+      run.developer_attempt += 1;
+      run.recovery_attempt = 0;
+      run.last_error = undefined;
+      run.terminal_reason = undefined;
+      run.next_retry_at = undefined;
+      const finding = run.latest_finding;
+      await this.store.appendEvent(run, {
+        type: "developer_reassigned",
+        message: `Developer reassigned from UID ${previous.agent_uid} to UID ${agentUid}; prior Topic was preserved as history.`,
+        data: { previous, current: { agent_uid: agentUid, topic_id: task.topic } },
+      });
+      await this.dispatch(run, run.developer, `developer-reassigned-${agentUid}-${run.developer_attempt}-${run.iteration}`, {
+        topicId: task.topic,
+        clientMsgId: "",
+        text: developerPrompt(run, "initial"),
+        files: [{ name: finding.name, url: finding.url, mimeType: "application/zip", size: finding.size }],
+      });
+      return await this.transition(run, "developer_implementing", "developer", `open PR on ${run.branch}`, "Existing Finding ZIP handed to the reassigned Developer in a new Agent Task.");
+    });
+  }
+
   async resume(runId: string): Promise<LoopRun> {
     return await this.withRunLock(runId, async () => {
       const run = await this.store.readRun(runId);

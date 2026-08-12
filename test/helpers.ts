@@ -20,6 +20,7 @@ export class FakeCatsco implements ICatscoClient {
   topics = new Map<string, { agentUid: number; messages: CatscoMessage[]; files: CatscoFile[]; episode?: EpisodeStatus }>();
   fixtureZip?: string;
   validateError?: Error;
+  sentInputs: SendMessageInput[] = [];
 
   async validateSession() {
     if (this.validateError) throw this.validateError;
@@ -42,6 +43,7 @@ export class FakeCatsco implements ICatscoClient {
   }
 
   async sendMessage(input: SendMessageInput): Promise<SendMessageResult> {
+    this.sentInputs.push(structuredClone(input));
     const topic = this.topics.get(input.topicId)!;
     const existing = topic.messages.find((message) => message.client_msg_id === input.clientMsgId);
     if (existing) return { id: existing.id, seq_id: existing.id, topic_id: input.topicId, client_msg_id: input.clientMsgId, duplicate: true };
