@@ -109,7 +109,7 @@ export function createLoopApi(controller: LoopController, store: RunStore) {
         send(response, 200, { finding, markdown: await readFindingMarkdown(path) });
         return;
       }
-      const match = url.pathname.match(/^\/api\/runs\/(run_[A-Za-z0-9_-]+)(?:\/(events|pause|resume|reconcile|cancel))?$/);
+      const match = url.pathname.match(/^\/api\/runs\/(run_[A-Za-z0-9_-]+)(?:\/(events|pause|resume|reconcile|cancel|developer))?$/);
       if (!match) throw new HttpError(404, "not found");
       const runId = match[1]!;
       const action = match[2];
@@ -124,6 +124,11 @@ export function createLoopApi(controller: LoopController, store: RunStore) {
       }
       if (request.method === "POST" && action === "pause") {
         send(response, 200, await controller.pause(runId));
+        return;
+      }
+      if (request.method === "POST" && action === "developer") {
+        const body = await jsonBody(request) as { agent_uid?: number };
+        send(response, 200, await controller.reassignDeveloper(runId, Number(body.agent_uid)));
         return;
       }
       if (request.method === "POST" && action === "resume") {

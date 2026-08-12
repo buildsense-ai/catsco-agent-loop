@@ -399,6 +399,28 @@ test("operator resume retries a stale strict-worker refusal with the direct-task
   assert.match(String(resumed?.content ?? ""), /do not invoke the legacy loopctl-worker/i);
 });
 
+test("operator can reassign a paused pre-PR Run to a new Developer without redoing Monday", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  const mondayTopic = run.monday.topic_id;
+  const findingId = run.latest_finding?.id;
+  const oldDeveloperTopic = run.developer.topic_id;
+  run = await ctx.controller.pause(run.run_id);
+
+  run = await ctx.controller.reassignDeveloper(run.run_id, 365);
+  assert.equal(run.phase, "developer_implementing");
+  assert.equal(run.monday.topic_id, mondayTopic);
+  assert.equal(run.latest_finding?.id, findingId);
+  assert.equal(run.developer.agent_uid, 365);
+  assert.notEqual(run.developer.topic_id, oldDeveloperTopic);
+  const topic = ctx.catsco.topics.get(run.developer.topic_id!);
+  assert.equal(topic?.agentUid, 365);
+  assert.equal(ctx.catsco.sentInputs.at(-1)?.files?.length, 1);
+  assert.match(topic?.messages.at(-1)?.content ?? "", /direct CatsCompany Agent Task/i);
+  const events = await ctx.store.readEvents(run.run_id, 0);
+  assert.equal(events.some((event) => event.type === "developer_reassigned"), true);
+});
+
 test("protocol names inside ordinary tool output do not misclassify a direct Developer", async () => {
   const ctx = await setup();
   let run = await advanceToDeveloper(ctx);

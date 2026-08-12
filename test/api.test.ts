@@ -152,6 +152,7 @@ test("API forwards idempotency keys and exposes soft pause to the trusted Artifa
     config: { operatorToken: "secret", allowedOrigin: "https://artifact.example:19991" },
     createRun: async (input: { idempotency_key?: string }) => { calls.push({ kind: "create", value: input.idempotency_key }); return run; },
     pause: async (runId: string) => { calls.push({ kind: "pause", value: runId }); return { ...run, phase: "paused" }; },
+    reassignDeveloper: async (runId: string, agentUid: number) => { calls.push({ kind: "developer", value: `${runId}:${agentUid}` }); return { ...run, developer: { agent_uid: agentUid, episode_started: false } }; },
   } as unknown as LoopController;
   const api = createLoopApi(controller, store);
   const address = await api.listen("127.0.0.1", 0);
@@ -163,7 +164,8 @@ test("API forwards idempotency keys and exposes soft pause to the trusted Artifa
     assert.equal((await fetch(`${base}/api/runs/${run.run_id}/pause`, { method: "POST", headers: { origin: "https://evil.example" } })).status, 403);
     assert.equal((await fetch(`${base}/api/runs/${run.run_id}/pause`, { method: "POST", headers: { origin: "https://artifact.example:19991" } })).status, 200);
     assert.equal((await fetch(`${base}/api/runs/${run.run_id}/pause`, { method: "POST", headers: { authorization: "Bearer secret" } })).status, 200);
-    assert.deepEqual(calls, [{ kind: "create", value: "cats-message-42" }, { kind: "pause", value: run.run_id }, { kind: "pause", value: run.run_id }]);
+    assert.equal((await fetch(`${base}/api/runs/${run.run_id}/developer`, { method: "POST", headers: { authorization: "Bearer secret", "content-type": "application/json" }, body: JSON.stringify({ agent_uid: 365 }) })).status, 200);
+    assert.deepEqual(calls, [{ kind: "create", value: "cats-message-42" }, { kind: "pause", value: run.run_id }, { kind: "pause", value: run.run_id }, { kind: "developer", value: `${run.run_id}:365` }]);
   } finally {
     await api.close();
   }
