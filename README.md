@@ -28,7 +28,7 @@ set -a; . ./.env; set +a
 npm start
 ```
 
-The API listens on `127.0.0.1:19992` by default. Every `/api/*` request requires `Authorization: Bearer $CATSLOOP_OPERATOR_TOKEN`.
+The API listens on `127.0.0.1:19992` by default. Run status, events, Finding content, and validated ZIP downloads are public read-only endpoints. Every state-changing request requires `Authorization: Bearer $CATSLOOP_OPERATOR_TOKEN`.
 
 ```bash
 export CATSLOOP_OPERATOR_TOKEN=...
@@ -89,7 +89,7 @@ POST /api/runs/:id/reconcile
 POST /api/runs/:id/cancel
 ```
 
-The static operator console is in `artifact/`. It displays and manages existing Runs but does not create them. It contains no credentials; the operator supplies the API token at runtime and the browser holds it in `sessionStorage`. Saturday's thin semantic entrypoint is packaged in `skills/start-agent-loop/`.
+The static operator console is in `artifact/`. It displays existing Runs publicly and does not create them. It derives the Controller endpoint from the Artifact host, so ordinary viewing needs neither configuration nor credentials. If an operator invokes pause/resume/reconcile/cancel, the token is requested at that point and held only in `sessionStorage`. Saturday's thin semantic entrypoint is packaged in `skills/start-agent-loop/`.
 
 ## Validation
 

@@ -545,6 +545,31 @@ test("operator soft pause sends no message and resume continues the same Topic",
   assert.equal(ctx.catsco.topics.get(topicId)!.messages.length, messageCount, "resume reconciles before any later continuation");
 });
 
+test("operator resume wakes a mechanically blocked delivery that never started an Episode", async () => {
+  const ctx = await setup();
+  let run = await ctx.controller.createRun({ request: "work", repo: "acme/widget" });
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  const topicId = run.monday.topic_id!;
+  const firstMessageCount = ctx.catsco.topics.get(topicId)!.messages.length;
+  run.phase = "blocked";
+  run.active_actor = "none";
+  run.waiting_for = "operator intervention";
+  run.terminal_reason = "No mechanical progress for 90 minutes while waiting for validated Finding ZIP.";
+  run.resume_phase = "monday_finding";
+  run.monday.episode_started = false;
+  await ctx.store.writeRun(run);
+
+  run = await ctx.controller.resume(run.run_id);
+
+  assert.equal(run.phase, "monday_finding");
+  assert.equal(run.monday.topic_id, topicId);
+  assert.equal(ctx.catsco.topics.get(topicId)!.messages.length, firstMessageCount + 1);
+  const message = ctx.catsco.topics.get(topicId)!.messages.at(-1)!;
+  assert.deepEqual(message.metadata?.mentions, ["usr553"]);
+  assert.match(String(message.content), /never observed this Agent Episode start/);
+});
+
 test("a softly paused Run does not consume the active execution slot", async () => {
   const ctx = await setup();
   let first = await ctx.controller.createRun({ request: "first", repo: "acme/widget" });

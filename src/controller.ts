@@ -5,7 +5,7 @@ import { activityAgent, computeActivityState } from "./activity.js";
 import { CatscoAuthError, GithubAuthError, LoopError } from "./errors.js";
 import type { ICatscoClient } from "./catsco-client.js";
 import type { IGithubClient } from "./github-client.js";
-import { developerPrompt, mondayFindingPrompt, mondayReviewPrompt, supplementPrompt } from "./prompts.js";
+import { developerPrompt, mondayFindingPrompt, mondayReviewPrompt, supplementPrompt, unstartedResumePrompt } from "./prompts.js";
 import { isTerminalPhase, RunStore } from "./store.js";
 import type {
   AgentTurnState,
@@ -199,6 +199,7 @@ export class LoopController {
     return await this.withRunLock(runId, async () => {
       const run = await this.store.readRun(runId);
       if (!["paused", "blocked", "blocked_auth", "blocked_github_auth"].includes(run.phase)) return run;
+      const blockedWithoutEpisodeStart = run.phase === "blocked" && /No mechanical progress/i.test(run.terminal_reason ?? "");
       const reviewerAuthBlocked = Boolean(run.monday.github_auth_error);
       run.last_error = undefined;
       run.terminal_reason = undefined;
@@ -225,6 +226,23 @@ export class LoopController {
         run.review_dispatch_seq = run.monday.dispatch_seq;
         cycle.dispatch_seq = run.monday.dispatch_seq;
         return await this.transition(run, phase, this.actorFor(phase), `GitHub review by ${run.monday_github_login}`, "Reviewer credentials were marked restored; a fresh prompt was sent to the original Monday Topic.");
+      }
+      const resumedAgent = phase === "monday_finding" || phase === "monday_review"
+        ? run.monday
+        : phase === "developer_implementing"
+          ? run.developer
+          : undefined;
+      if (blockedWithoutEpisodeStart && resumedAgent?.topic_id && !resumedAgent.episode_started) {
+        const role = resumedAgent === run.monday ? "Monday" : "Developer";
+        const missing = phase === "monday_finding" ? "a validated Finding ZIP" : run.waiting_for || "the current mechanical delivery";
+        if (role === "Monday") run.monday_attempt += 1;
+        else run.developer_attempt += 1;
+        await this.dispatch(run, resumedAgent, `operator-resume-unstarted-${role.toLowerCase()}-${role === "Monday" ? run.monday_attempt : run.developer_attempt}-${run.iteration}`, {
+          topicId: resumedAgent.topic_id,
+          clientMsgId: "",
+          text: unstartedResumePrompt(run, role, missing),
+        });
+        return await this.transition(run, phase, this.actorFor(phase), missing, "Operator resumed an unstarted Agent delivery with a structured wake in the original Topic.");
       }
       return await this.transition(run, phase, this.actorFor(phase), "manual reconciliation", "Operator resumed the existing Run; no new Topic was created.");
     });

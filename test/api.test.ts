@@ -103,7 +103,7 @@ async function writeFinding(path: string, markdown: string): Promise<void> {
   });
 }
 
-test("API requires operator token, enforces exact CORS origin, and discloses Run timing fields", async () => {
+test("API exposes Run reads publicly, protects writes, enforces exact CORS origin, and discloses timing fields", async () => {
   const root = await mkdtemp(join(tmpdir(), "catsloop-api-"));
   const store = new RunStore(root);
   await store.initialize(runFixture());
@@ -116,8 +116,9 @@ test("API requires operator token, enforces exact CORS origin, and discloses Run
   const headers = { authorization: "Bearer secret", origin: "https://artifact.example:19991" };
   try {
     assert.equal((await fetch(`${base}/health`)).status, 200);
-    assert.equal((await fetch(`${base}/api/runs`)).status, 401);
-    const allowed = await fetch(`${base}/api/runs`, { headers });
+    const publicRead = await fetch(`${base}/api/runs`);
+    assert.equal(publicRead.status, 200);
+    const allowed = await fetch(`${base}/api/runs`, { headers: { origin: "https://artifact.example:19991" } });
     assert.equal(allowed.status, 200);
     assert.equal(allowed.headers.get("access-control-allow-origin"), "https://artifact.example:19991");
     const listed = await allowed.json() as { runs: LoopRun[] };
@@ -131,6 +132,7 @@ test("API requires operator token, enforces exact CORS origin, and discloses Run
     assert.ok(body.last_activity_at);
     assert.ok(body.last_progress_at);
     assert.ok(body.phase_started_at);
+    assert.equal((await fetch(`${base}/api/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request: "work", repo: "acme/widget" }) })).status, 401);
     const denied = await fetch(`${base}/api/runs`, { headers: { authorization: "Bearer secret", origin: "https://evil.example" } });
     assert.equal(denied.status, 403);
   } finally {
@@ -164,7 +166,7 @@ test("API forwards idempotency keys and exposes soft pause", async () => {
   }
 });
 
-test("API exposes validated Finding markdown and authenticated ZIP download", async () => {
+test("API exposes validated Finding markdown and ZIP download without an operator token", async () => {
   const root = await mkdtemp(join(tmpdir(), "catsloop-api-finding-"));
   const store = new RunStore(root);
   const run = runFixture();
@@ -195,11 +197,11 @@ test("API exposes validated Finding markdown and authenticated ZIP download", as
   const base = `http://127.0.0.1:${address.port}`;
   const headers = { authorization: "Bearer secret", origin: "https://artifact.example:19991" };
   try {
-    const content = await fetch(`${base}/api/runs/${run.run_id}/findings/1`, { headers });
+    const content = await fetch(`${base}/api/runs/${run.run_id}/findings/1`, { headers: { origin: "https://artifact.example:19991" } });
     assert.equal(content.status, 200);
     const body = await content.json() as { markdown: string };
     assert.match(body.markdown, /保留 Review Cycle 证据/);
-    const download = await fetch(`${base}/api/runs/${run.run_id}/findings/1/download`, { headers });
+    const download = await fetch(`${base}/api/runs/${run.run_id}/findings/1/download`);
     assert.equal(download.status, 200);
     assert.equal(download.headers.get("content-type"), "application/zip");
     assert.equal(download.headers.get("content-disposition"), 'attachment; filename="finding-v1.zip"');
