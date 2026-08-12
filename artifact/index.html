@@ -3,135 +3,48 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <title>Agent Loop Control</title>
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="Saturday 自迭代任务进度">
+  <title>自迭代任务台</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="grain" aria-hidden="true"></div>
-  <header class="masthead">
-    <div class="brand-lockup">
-      <span class="signal" aria-hidden="true"></span>
+  <main class="page">
+    <header class="masthead">
       <div>
-        <p class="eyebrow">CATSCOMPANY / ITERATION FACILITY</p>
-        <h1>Agent Loop Control</h1>
+        <p class="eyebrow">SATURDAY · AGENT LOOP</p>
+        <h1>自迭代任务台</h1>
+        <p class="lead">审查、开发与验证沿同一条任务链持续推进，直到当前提交被批准。</p>
       </div>
-    </div>
-    <div class="connection">
-      <span id="healthDot" class="health-dot"></span>
-      <span id="healthText">未连接</span>
-      <button id="connectionButton" class="text-button" type="button">连接设置</button>
-    </div>
-  </header>
-
-  <main class="shell">
-    <aside class="run-rail">
-      <div class="rail-title">
-        <span>RUN REGISTER</span>
-        <button id="newRunButton" class="icon-button" type="button" aria-label="创建任务">＋</button>
+      <div class="head-actions">
+        <span class="connection" id="connectionState" data-state="offline"><i></i><b id="healthText">未连接</b></span>
+        <button class="quiet-button" id="connectionButton" type="button">连接设置</button>
       </div>
-      <div id="runList" class="run-list" aria-live="polite">
-        <div class="empty-rail">连接后读取任务</div>
+    </header>
+
+    <section class="toolbar">
+      <div class="filters" role="group" aria-label="任务筛选">
+        <button class="active" type="button" data-filter="all">全部 <b id="runCount">0</b></button>
+        <button type="button" data-filter="active">处理中 <b id="activeCount">0</b></button>
+        <button type="button" data-filter="done">已结束 <b id="doneCount">0</b></button>
       </div>
-    </aside>
-
-    <section class="workspace">
-      <div id="emptyState" class="empty-state">
-        <span class="index-mark">00</span>
-        <h2>选择一个 Run，<br>或显式启动新的闭环。</h2>
-        <p>普通 Monday 会话不会被自动接管。只有从这里创建的 Run 才进入双 Agent 自迭代。</p>
-        <button id="emptyStartButton" class="primary-button" type="button">开始自迭代</button>
-      </div>
-
-      <div id="runView" class="run-view" hidden>
-        <div class="run-heading">
-          <div>
-            <p id="runId" class="eyebrow"></p>
-            <h2 id="runTitle">—</h2>
-          </div>
-          <div class="run-actions">
-            <button id="reconcileButton" class="secondary-button" type="button">立即核对</button>
-            <button id="resumeButton" class="secondary-button" type="button">恢复</button>
-            <button id="cancelButton" class="danger-button" type="button">取消</button>
-          </div>
-        </div>
-
-        <div class="stage-strip" aria-label="执行阶段">
-          <div data-stage="monday_finding"><span>01</span>Finding</div>
-          <i></i>
-          <div data-stage="developer_implementing"><span>02</span>Build</div>
-          <i></i>
-          <div data-stage="waiting_ci"><span>03</span>CI</div>
-          <i></i>
-          <div data-stage="monday_review"><span>04</span>Review</div>
-          <i></i>
-          <div data-stage="completed"><span>05</span>Approve</div>
-        </div>
-
-        <div class="metric-grid">
-          <article class="metric hero-metric">
-            <span>ACTIVE ACTOR</span>
-            <strong id="activeActor">—</strong>
-            <small id="waitingFor">—</small>
-          </article>
-          <article class="metric"><span>PHASE</span><strong id="phase">—</strong><small id="lastProgress">—</small></article>
-          <article class="metric"><span>ACTIVITY</span><strong id="activityState">—</strong><small id="lastActivity">—</small></article>
-          <article class="metric"><span>ITERATION</span><strong id="iteration">—</strong><small id="attempts">—</small></article>
-          <article class="metric"><span>CI</span><strong id="ciState">—</strong><small id="headSha">—</small></article>
-        </div>
-
-        <div class="evidence-grid">
-          <section class="panel">
-            <div class="panel-head"><h3>Mechanical evidence</h3><span>LIVE</span></div>
-            <dl class="evidence-list">
-              <div><dt>Repository</dt><dd id="repo">—</dd></div>
-              <div><dt>Branch</dt><dd id="branch">—</dd></div>
-              <div><dt>Pull request</dt><dd id="pullRequest">—</dd></div>
-              <div><dt>Review cycle</dt><dd id="reviewCycle">—</dd></div>
-              <div><dt>Finding</dt><dd id="finding">—</dd></div>
-              <div><dt>Finding history</dt><dd id="findingHistory">—</dd></div>
-              <div><dt>Monday Topic</dt><dd id="mondayTopic">—</dd></div>
-              <div><dt>Monday observation</dt><dd id="mondayObservation">—</dd></div>
-              <div><dt>Developer Topic</dt><dd id="developerTopic">—</dd></div>
-              <div><dt>Developer observation</dt><dd id="developerObservation">—</dd></div>
-            </dl>
-          </section>
-          <section class="panel timeline-panel">
-            <div class="panel-head"><h3>Event ledger</h3><span id="eventCount">0 EVENTS</span></div>
-            <ol id="timeline" class="timeline"></ol>
-          </section>
-        </div>
-      </div>
+      <div class="sync"><time id="lastSync">尚未同步</time><button id="refreshButton" type="button">刷新</button></div>
     </section>
+
+    <section class="tasks" id="runList" aria-live="polite"></section>
   </main>
 
   <dialog id="connectionDialog">
-    <form id="connectionForm" method="dialog" class="dialog-card">
-      <div class="dialog-head"><p class="eyebrow">SECURE LOCAL SESSION</p><button class="close-button" type="button" aria-label="关闭">×</button></div>
-      <h2>连接 Controller</h2>
-      <label>API 地址<input id="apiUrl" name="apiUrl" type="url" required></label>
-      <label>操作员 Token<input id="operatorToken" name="operatorToken" type="password" autocomplete="off" required></label>
-      <p>Token 仅保存在当前标签页的 sessionStorage，不写入 Artifact。</p>
-      <button class="primary-button" value="default" type="submit">验证并连接</button>
+    <form class="dialog-card" id="connectionForm">
+      <header><div><small>安全连接</small><h2>连接 Loop Controller</h2></div><button type="button" data-close aria-label="关闭">×</button></header>
+      <label>接口地址<input id="apiUrl" type="url" required placeholder="https://example.com:19993"></label>
+      <label>操作员令牌<input id="operatorToken" type="password" autocomplete="off" required></label>
+      <p>令牌只保留在当前浏览器标签页的 sessionStorage 中。</p>
+      <button class="primary-button" type="submit">验证并连接</button>
     </form>
   </dialog>
 
-  <dialog id="newRunDialog">
-    <form id="newRunForm" method="dialog" class="dialog-card wide">
-      <div class="dialog-head"><p class="eyebrow">EXPLICIT LOOP ENTRY</p><button class="close-button" type="button" aria-label="关闭">×</button></div>
-      <h2>开始新的自迭代</h2>
-      <label class="full">自然语言实现要求<textarea id="request" name="request" rows="8" required placeholder="说明需要实现什么、成功标准和约束。"></textarea></label>
-      <div class="form-grid">
-        <label>GitHub 仓库<input id="repoInput" name="repo" placeholder="owner/repository" required></label>
-        <label>Base 分支<input id="baseBranch" name="base" value="main" required></label>
-        <label>Monday UID<input id="mondayUid" name="mondayUid" type="number" value="553" required></label>
-        <label>Developer UID<input id="developerUid" name="developerUid" type="number" value="365" required></label>
-      </div>
-      <div class="dialog-submit"><span>创建后才能进入 Loop；普通 ZIP 不会触发。</span><button class="primary-button" type="submit">创建 Run</button></div>
-    </form>
-  </dialog>
-
-  <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="app.js" defer></script>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
 </body>
 </html>

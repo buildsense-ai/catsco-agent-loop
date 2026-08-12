@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { basename } from "node:path";
 import { activityAgent, computeActivityState } from "./activity.js";
@@ -35,6 +35,17 @@ function safeRepo(value: string): string {
   const repo = value.trim();
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error("repo must be owner/name");
   return repo;
+}
+
+function safeIdempotencyKey(value: string | undefined): string | undefined {
+  const key = value?.trim();
+  if (!key) return undefined;
+  if (!/^[A-Za-z0-9._:-]{8,200}$/.test(key)) throw new Error("invalid idempotency key");
+  return createHash("sha256").update(key).digest("hex");
+}
+
+function creationFingerprint(request: string, repo: string, baseBranch?: string): string {
+  return createHash("sha256").update(JSON.stringify({ request, repo, base_branch: baseBranch?.trim() || null })).digest("hex");
 }
 
 function isZip(file: CatscoFile): boolean {
@@ -98,7 +109,16 @@ export class LoopController {
     const request = input.request?.trim();
     if (!request) throw new Error("request is required");
     const repo = safeRepo(input.repo);
-    const base = input.base_branch?.trim() || "main";
+    const idempotencyKey = safeIdempotencyKey(input.idempotency_key);
+    const fingerprint = creationFingerprint(request, repo, input.base_branch);
+    if (idempotencyKey) {
+      const existing = await this.store.readCreationReceipt(idempotencyKey);
+      if (existing) {
+        if (existing.fingerprint !== fingerprint) throw new LoopError("idempotency key was already used for a different request", "idempotency_conflict", false, 409);
+        return await this.store.readRun(existing.run_id);
+      }
+    }
+    const base = input.base_branch?.trim() || await this.github.getDefaultBranch(repo);
     if (!/^[A-Za-z0-9._/-]+$/.test(base) || base.includes("..")) throw new Error("invalid base branch");
     const runId = makeRunId();
     const created = now();
@@ -128,6 +148,7 @@ export class LoopController {
       receipts: {},
       created_at: created,
       updated_at: created,
+      phase_started_at: created,
       activity_state: "quiet",
       last_activity_at: created,
       last_progress_at: created,
@@ -137,6 +158,20 @@ export class LoopController {
       throw new Error("Monday and Developer GitHub logins must be different");
     }
     await this.store.initialize(run);
+    if (idempotencyKey) {
+      try {
+        await this.store.writeCreationReceipt({ key: idempotencyKey, fingerprint, run_id: run.run_id, created_at: created });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const existing = await this.store.readCreationReceipt(idempotencyKey);
+        if (!existing || existing.fingerprint !== fingerprint) {
+          await this.store.removeRun(run.run_id);
+          throw new LoopError("idempotency key was already used for a different request", "idempotency_conflict", false, 409);
+        }
+        await this.store.removeRun(run.run_id);
+        return await this.store.readRun(existing.run_id);
+      }
+    }
     await this.store.appendEvent(run, { type: "run_created", message: "Run created from explicit Controller input.", data: { repo, base_branch: base } });
     return run;
   }
@@ -150,10 +185,20 @@ export class LoopController {
     });
   }
 
+  async pause(runId: string): Promise<LoopRun> {
+    return await this.withRunLock(runId, async () => {
+      const run = await this.store.readRun(runId);
+      if (isTerminalPhase(run.phase) || run.phase === "paused") return run;
+      this.rememberResumePhase(run);
+      run.next_retry_at = undefined;
+      return await this.transition(run, "paused", "none", "operator resume", "Run softly paused by operator. No Agent message was sent and external work was preserved.");
+    });
+  }
+
   async resume(runId: string): Promise<LoopRun> {
     return await this.withRunLock(runId, async () => {
       const run = await this.store.readRun(runId);
-      if (!["blocked", "blocked_auth", "blocked_github_auth"].includes(run.phase)) return run;
+      if (!["paused", "blocked", "blocked_auth", "blocked_github_auth"].includes(run.phase)) return run;
       const reviewerAuthBlocked = Boolean(run.monday.github_auth_error);
       run.last_error = undefined;
       run.terminal_reason = undefined;
@@ -198,8 +243,8 @@ export class LoopController {
     this.ticking = true;
     try {
       const runs = await this.store.listNonTerminal();
-      const expired = runs.filter((run) => this.absoluteTimeoutReached(run));
-      const active = runs.filter((run) => run.phase !== "queued").slice(0, this.config.maxActiveRuns);
+      const expired = runs.filter((run) => run.phase !== "paused" && this.absoluteTimeoutReached(run));
+      const active = runs.filter((run) => run.phase !== "queued" && run.phase !== "paused").slice(0, this.config.maxActiveRuns);
       const available = Math.max(0, this.config.maxActiveRuns - active.length);
       const queued = runs.filter((run) => run.phase === "queued" && !this.absoluteTimeoutReached(run)).slice(0, available);
       const selected = [...new Map([...expired, ...active, ...queued].map((run) => [run.run_id, run])).values()];
@@ -254,6 +299,7 @@ export class LoopController {
         case "waiting_ci": return await this.reconcileCi(run, forced);
         case "monday_review": return await this.reconcileMondayReview(run, forced);
         case "recovering": return await this.performRecovery(run, forced);
+        case "paused": return run;
         case "blocked":
         case "blocked_auth":
         case "blocked_github_auth":
@@ -557,10 +603,12 @@ export class LoopController {
       || (previousEpisode?.updated_at ?? "") !== (episode?.updated_at ?? "");
     agent.episode = episode;
     agent.episode_observed_at = observedAt;
+    if (episodeChanged) agent.last_episode_change_at = observedAt;
     const responses = messages.filter((message) => message.from_uid === agent.agent_uid);
     const response = responses.at(-1);
     if (response) {
       agent.last_agent_seq = Number(response.seq_id ?? response.id);
+      agent.last_message_at = observedAt;
     }
     const directResponse = responses.filter((message) => !message.content_blocks?.some((block) => block.type === "tool_use" || block.type === "tool_result")).at(-1);
     if (directResponse) {
@@ -662,6 +710,7 @@ export class LoopController {
     agent.episode = previous;
     agent.episode_started = false;
     agent.last_prompt_key = key;
+    agent.turn_started_at = sentAt;
     agent.last_observed_seq = Math.max(agent.last_observed_seq ?? 0, receipt.seq_id);
     agent.protocol_error = undefined;
     agent.github_auth_error = undefined;
@@ -674,7 +723,7 @@ export class LoopController {
     const episode = agent.episode;
     if (!agent.episode_started || !episode || !EPISODE_TERMINAL.has(episode.state)) return run;
     if (run.recovery_attempt >= RECOVERY_DELAYS.length) return await this.block(run, `Recovery attempts exhausted; still missing ${missing}.`);
-    run.resume_phase = run.phase as Exclude<RunPhase, "recovering">;
+    run.resume_phase = run.phase as Exclude<RunPhase, "recovering" | "paused">;
     run.next_retry_at = new Date(Date.now() + RECOVERY_DELAYS[run.recovery_attempt]!).toISOString();
     run.waiting_for = `${missing}; recovery scheduled`;
     run.last_error = episode.error || `Episode ${episode.state} without complete delivery`;
@@ -729,7 +778,7 @@ export class LoopController {
     return false;
   }
 
-  private inferResumePhase(run: LoopRun): Exclude<RunPhase, "recovering"> {
+  private inferResumePhase(run: LoopRun): Exclude<RunPhase, "recovering" | "paused"> {
     if (!run.monday.topic_id) return "queued";
     if (!run.latest_finding) return "monday_finding";
     if (!run.developer.topic_id || !run.pr) return "developer_implementing";
@@ -779,7 +828,7 @@ export class LoopController {
   }
 
   private rememberResumePhase(run: LoopRun): void {
-    if (run.phase !== "recovering") run.resume_phase = run.phase as Exclude<RunPhase, "recovering">;
+    if (run.phase !== "recovering" && run.phase !== "paused") run.resume_phase = run.phase as Exclude<RunPhase, "recovering" | "paused">;
   }
 
   private async withRunLock<T>(runId: string, action: () => Promise<T>): Promise<T> {
@@ -805,10 +854,25 @@ export class LoopController {
 
   private async transition(run: LoopRun, phase: RunPhase, actor: LoopRun["active_actor"], waitingFor: string, message: string): Promise<LoopRun> {
     const previous = run.phase;
+    const changedAt = now();
+    if (previous !== phase) {
+      const previousAgent = previous === "monday_finding" || previous === "monday_review"
+        ? run.monday
+        : previous === "developer_implementing"
+          ? run.developer
+          : undefined;
+      if (previousAgent?.turn_started_at) {
+        previousAgent.last_turn_started_at = previousAgent.turn_started_at;
+        previousAgent.last_turn_ended_at = changedAt;
+        previousAgent.last_turn_duration_ms = Math.max(0, Date.parse(changedAt) - Date.parse(previousAgent.turn_started_at));
+        previousAgent.turn_started_at = undefined;
+      }
+      run.phase_started_at = changedAt;
+    }
     run.phase = phase;
     run.active_actor = actor;
     run.waiting_for = waitingFor;
-    run.updated_at = now();
+    run.updated_at = changedAt;
     run.activity_state = computeActivityState(run, Date.parse(run.updated_at), this.config.activityStallMs);
     await this.store.writeRun(run);
     await this.store.appendEvent(run, { type: "phase_changed", message, data: { from: previous, to: phase, waiting_for: waitingFor } });

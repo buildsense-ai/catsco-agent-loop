@@ -1,220 +1,246 @@
-const state = {
-  apiUrl: sessionStorage.getItem("catsloop.apiUrl") || (location.protocol === "https:" ? `${location.protocol}//${location.hostname}:19993` : "http://127.0.0.1:19992"),
-  token: sessionStorage.getItem("catsloop.operatorToken") || "",
-  runs: [],
-  selected: null,
-  events: [],
-  poller: null,
-};
-
 const $ = (id) => document.getElementById(id);
+const state = {
+  apiUrl: sessionStorage.getItem("catsloop.apiUrl") || "",
+  token: sessionStorage.getItem("catsloop.operatorToken") || "",
+  runs: [], events: new Map(), findings: new Map(), expanded: new Set(),
+  filter: "all", connected: false, refreshing: false,
+};
 const terminal = new Set(["completed", "cancelled", "blocked", "blocked_auth", "blocked_github_auth"]);
-const stages = ["monday_finding", "developer_implementing", "waiting_ci", "monday_review", "completed"];
+const active = new Set(["queued", "monday_finding", "developer_implementing", "waiting_ci", "monday_review", "recovering", "paused"]);
+const phaseNames = {
+  queued: "排队中", monday_finding: "审查中", developer_implementing: "开发中", waiting_ci: "验证中",
+  monday_review: "复核中", recovering: "正在恢复", paused: "已暂停", blocked: "需要处理",
+  blocked_auth: "登录失效", blocked_github_auth: "GitHub 登录失效", cancelled: "已取消", completed: "已完成",
+};
+const eventNames = {
+  run_created: "任务已创建", message_dispatched: "已交给智能体", agent_activity: "收到新进展",
+  finding_validated: "Finding ZIP 已验证", github_delivery: "发现 Pull Request", ci_observed: "CI 状态已更新",
+  review_cycle_started: "开始新一轮复核", review_observed: "收到 GitHub 审核", head_changed: "检测到新提交",
+  phase_changed: "阶段已切换", controller_restarted: "Controller 已恢复", reconcile_error: "核对暂时失败",
+  activity_state_changed: "活动状态已变化", finding_rejected: "Finding ZIP 未通过验证",
+};
+let toastTimer;
 
-async function api(path, options = {}) {
-  const response = await fetch(new URL(path, state.apiUrl), {
-    ...options,
-    headers: { authorization: `Bearer ${state.token}`, ...(options.body ? { "content-type": "application/json" } : {}), ...options.headers },
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
-  return body;
+function node(tag, className = "", text = "") {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text !== "") element.textContent = text;
+  return element;
 }
-
+function setConnection(value, label) {
+  state.connected = value;
+  $("connectionState").dataset.state = value ? "online" : "offline";
+  $("healthText").textContent = label;
+}
 function toast(message) {
   $("toast").textContent = message;
   $("toast").classList.add("show");
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => $("toast").classList.remove("show"), 3500);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("toast").classList.remove("show"), 2200);
 }
-
-function health(ok, label) {
-  $("healthDot").classList.toggle("online", ok);
-  $("healthText").textContent = label;
+function elapsed(start, end = "") {
+  if (!start) return "—";
+  const ms = Math.max(0, Date.parse(end || new Date().toISOString()) - Date.parse(start));
+  if (!Number.isFinite(ms)) return "—";
+  const hours = Math.floor(ms / 3600000);
+  const minutes = Math.floor(ms % 3600000 / 60000);
+  const seconds = Math.floor(ms % 60000 / 1000);
+  return `${hours ? `${String(hours).padStart(2,"0")}:` : ""}${String(minutes).padStart(2,"0")}:${String(seconds).padStart(2,"0")}`;
 }
-
-function short(value, length = 10) {
+function clock(value) {
   if (!value) return "—";
-  return value.length > length ? value.slice(0, length) : value;
+  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
 }
-
 function age(value) {
-  if (!value) return "—";
   const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  return `${Math.floor(seconds / 3600)}h ago`;
+  if (!Number.isFinite(seconds)) return "未知";
+  if (seconds < 60) return seconds < 8 ? "刚刚" : `${seconds} 秒前`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
+  return `${Math.floor(seconds / 86400)} 天前`;
 }
+function short(value, length = 9) { return value ? String(value).slice(0, length) : "—"; }
+function title(request) { return String(request || "未命名任务").replace(/\s+/g, " ").trim(); }
 
-function create(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function episodeObservation(agent, isActive) {
-  if (!agent?.episode) return "not observed";
-  const observed = agent.episode_observed_at ? `observed ${age(agent.episode_observed_at)}` : "observation time unknown";
-  return `${agent.episode.state} · ${observed} · ${isActive ? "ACTIVE" : "inactive snapshot"}`;
-}
-
-function renderRuns() {
-  const list = $("runList");
-  list.replaceChildren();
-  if (!state.runs.length) {
-    list.append(create("div", "empty-rail", "还没有显式创建的 Run"));
-    return;
-  }
-  for (const run of state.runs) {
-    const button = create("button", `run-item${state.selected?.run_id === run.run_id ? " active" : ""}`);
-    button.type = "button";
-    button.append(create("strong", "", run.request));
-    const meta = create("span");
-    meta.append(create("em", "", run.phase.replaceAll("_", " ")), create("b", "", `R${run.iteration}`));
-    button.append(meta);
-    button.addEventListener("click", () => selectRun(run.run_id));
-    list.append(button);
-  }
-}
-
-function setText(id, value) { $(id).textContent = value ?? "—"; }
-
-function renderDetail() {
-  const run = state.selected;
-  $("emptyState").hidden = Boolean(run);
-  $("runView").hidden = !run;
-  if (!run) return;
-  setText("runId", run.run_id);
-  setText("runTitle", run.request);
-  setText("activeActor", run.active_actor);
-  setText("waitingFor", run.waiting_for);
-  setText("phase", run.phase.replaceAll("_", " "));
-  setText("lastProgress", `progress ${age(run.last_progress_at)}`);
-  setText("activityState", run.activity_state?.replaceAll("_", " ") || "quiet");
-  setText("lastActivity", `activity ${age(run.last_activity_at)}`);
-  setText("iteration", String(run.iteration).padStart(2, "0"));
-  setText("attempts", `M ${run.monday_attempt} · D ${run.developer_attempt} · R ${run.recovery_attempt}`);
-  setText("ciState", run.ci?.state || "not observed");
-  setText("headSha", short(run.pr?.head_sha, 12));
-  setText("repo", `${run.repo} @ ${run.base_branch}`);
-  setText("branch", run.branch);
-  setText("reviewCycle", run.review_cycle
-    ? `C${run.review_cycle.cycle} · ${run.review_cycle.status} · ${short(run.review_cycle.head_sha, 12)}`
-    : "not started");
-  setText("finding", run.latest_finding ? `v${run.latest_finding.version} · ${short(run.latest_finding.sha256, 14)} · ${Math.ceil(run.latest_finding.size / 1024)} KB` : "—");
-  setText("findingHistory", `${run.finding_history?.length ?? 0} validated · ${run.review_cycles?.length ?? 0} review cycles`);
-  setText("mondayTopic", run.monday.topic_id || "—");
-  setText("mondayObservation", episodeObservation(run.monday, run.active_actor === "monday"));
-  setText("developerTopic", run.developer.topic_id || "—");
-  setText("developerObservation", episodeObservation(run.developer, run.active_actor === "developer"));
-  const pr = $("pullRequest");
-  pr.replaceChildren();
-  if (run.pr?.url) {
-    const anchor = create("a", "", `PR #${run.pr.number}`);
-    anchor.href = run.pr.url; anchor.target = "_blank"; anchor.rel = "noopener noreferrer";
-    pr.append(anchor);
-  } else pr.textContent = "—";
-  const currentStage = stages.includes(run.phase) ? stages.indexOf(run.phase) : run.phase === "completed" ? 4 : -1;
-  document.querySelectorAll("[data-stage]").forEach((node, index) => {
-    node.classList.toggle("active", index === currentStage);
-    node.classList.toggle("done", index < currentStage || run.phase === "completed");
+async function api(path, options = {}, raw = false) {
+  const response = await fetch(new URL(path, state.apiUrl), {
+    ...options,
+    headers: { authorization: `Bearer ${state.token}`, ...(options.body ? { "content-type": "application/json" } : {}), ...(options.headers || {}) },
   });
-  $("resumeButton").hidden = !["blocked", "blocked_auth", "blocked_github_auth"].includes(run.phase);
-  $("cancelButton").hidden = terminal.has(run.phase);
-  renderTimeline();
-}
-
-function renderTimeline() {
-  const list = $("timeline");
-  list.replaceChildren();
-  for (const event of [...state.events].reverse()) {
-    const item = create("li");
-    item.append(create("time", "", new Date(event.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })), create("b"));
-    const copy = create("div");
-    copy.append(create("strong", "", event.type.replaceAll("_", " ")), create("span", "", event.message));
-    item.append(copy);
-    list.append(item);
+  if (raw) {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response;
   }
-  setText("eventCount", `${state.events.length} EVENTS`);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
 }
 
-async function refresh() {
-  if (!state.token) return;
-  try {
-    const body = await api("/api/runs");
-    state.runs = body.runs;
-    if (state.selected) state.selected = state.runs.find((run) => run.run_id === state.selected.run_id) || null;
-    renderRuns(); renderDetail(); health(true, "Controller online");
-    if (state.selected) {
-      const events = await api(`/api/runs/${state.selected.run_id}/events?after=0`);
-      state.events = events.events;
-      renderTimeline();
-    }
-  } catch (error) {
-    health(false, "连接失败");
-    toast(error.message);
+function effectivePhase(run) { return run.phase === "recovering" || run.phase === "paused" ? run.resume_phase || run.phase : run.phase; }
+function actorInfo(run) {
+  const phase = effectivePhase(run);
+  if (run.phase === "paused") return { name: "Controller", icon: "II", label: "已暂停", index: phase === "developer_implementing" ? 1 : phase === "waiting_ci" ? 2 : 0 };
+  if (phase === "developer_implementing") return { name: "Developer", icon: "DEV", label: "开发中", index: 1 };
+  if (phase === "waiting_ci") return { name: "自动检查", icon: "CI", label: "验证中", index: 2 };
+  if (phase === "monday_finding" || phase === "monday_review") return { name: "Reviewer", icon: "REV", label: phase === "monday_review" ? "复核中" : "审查中", index: 0 };
+  return { name: "Controller", icon: "CTL", label: phaseNames[run.phase] || "处理中", index: 0 };
+}
+function cycleGraphic(run) {
+  const info = actorInfo(run);
+  const box = node("div", "cycle-panel");
+  const cycle = node("div", "cycle");
+  cycle.innerHTML = `<svg viewBox="0 0 170 170" aria-label="当前处于${info.label}">
+    <path class="arc ${info.index > 0 ? "done" : info.index < 0 ? "next" : ""}" d="M85 22 A63 63 0 0 1 140 116"/>
+    <path class="arrow" d="M137.1 120.8 L145.9 115.5 L137.3 110.5 Z"/>
+    <path class="arc ${info.index > 1 ? "done" : info.index < 1 ? "next" : ""}" d="M132 128 A63 63 0 0 1 38 128"/>
+    <path class="arrow" d="M34.6 124.3 L37 134.3 L44.4 127.5 Z"/>
+    <path class="arc ${info.index > 2 ? "done" : info.index < 2 ? "next" : ""}" d="M30 116 A63 63 0 0 1 73 23"/>
+    <path class="arrow" d="M77.9 22 L68.1 18.9 L70 28.7 Z"/>
+  </svg>`;
+  const copy = node("div", "cycle-copy");
+  copy.append(node("small", "", "当前轮次"), node("strong", "", String(Math.max(1, (run.iteration || 0) + 1)).padStart(2, "0")), node("b", "", info.label));
+  const pills = node("div", "phase-pills");
+  ["Reviewer", "Developer", "CI"].forEach((label, index) => pills.append(node("span", index === info.index ? "active" : "", label)));
+  cycle.append(copy, pills); box.append(cycle); return box;
+}
+
+function normalizeEvent(run, event) {
+  let actor = event.actor;
+  if (actor === "monday") actor = "reviewer";
+  if (actor === "github") actor = "ci";
+  if (event.type === "message_dispatched" && /monday/i.test(event.data?.action || "")) actor = "reviewer";
+  if (event.type === "message_dispatched" && /developer/i.test(event.data?.action || "")) actor = "developer";
+  if (!actor || actor === "none" || actor === "controller") {
+    if (event.type === "ci_observed" || event.type === "github_delivery" || event.type === "head_changed" || event.type === "review_observed") actor = event.type === "review_observed" ? "reviewer" : "ci";
+    else if (event.phase === "developer_implementing") actor = "developer";
+    else if (event.phase === "monday_finding" || event.phase === "monday_review") actor = "reviewer";
+    else actor = "controller";
+  }
+  const names = { reviewer: ["Reviewer", "REV"], developer: ["Developer", "DEV"], ci: ["自动检查", "CI"], controller: ["Controller", "CTL"] };
+  const [name, icon] = names[actor] || names.controller;
+  const cycle = event.data?.review_cycle || run.review_cycles?.find((item) => item.requested_at <= event.at && (!item.completed_at || item.completed_at >= event.at))?.cycle || 1;
+  return { name, icon, cycle, title: eventNames[event.type] || "状态已更新", message: event.message || run.waiting_for, at: event.at, type: event.type, data: event.data || {} };
+}
+function syntheticLatest(run) {
+  const info = actorInfo(run);
+  return { name: info.name, icon: info.icon, cycle: Math.max(1, (run.iteration || 0) + 1), title: phaseNames[run.phase] || "处理中", message: run.waiting_for || "正在核对最新状态", at: run.last_activity_at || run.updated_at, type: "current" };
+}
+function humanMessage(value) {
+  return String(value || "正在核对最新状态")
+    .replace(/an available Controller execution slot/i, "等待 Controller 调度")
+    .replace(/a validated Finding ZIP/i, "等待经过验证的 Finding ZIP")
+    .replace(/an open pull request/i, "等待 Developer 创建 Pull Request")
+    .replace(/a new Head SHA on the existing PR/i, "等待 Developer 推送新的提交")
+    .replace(/current-SHA approval or comment plus new Finding ZIP/i, "等待当前提交的批准，或审核意见与新 Finding ZIP")
+    .replace(/operator resume/i, "等待用户恢复任务")
+    .replace(/operator intervention/i, "等待用户处理")
+    .replace(/manual reconciliation/i, "正在重新核对已有交付");
+}
+function eventMessage(run, item, latest) {
+  if (latest) return `${humanMessage(item.message)} · ${age(item.at)}`;
+  switch (item.type) {
+    case "message_dispatched": return `已向 ${item.name} 的原会话发送本阶段要求`;
+    case "agent_activity": return `${item.name} 会话出现了新消息或 Episode 状态变化`;
+    case "finding_validated": return `Finding ZIP v${item.data?.version || ""} 已完成下载、校验和保存`;
+    case "github_delivery": return `已机械核对 PR #${item.data?.pr || run.pr?.number || "—"} 与当前提交`;
+    case "ci_observed": return `当前提交的 CI 状态：${item.data?.state === "success" ? "通过" : item.data?.state === "failure" ? "失败" : "运行中"}`;
+    case "review_cycle_started": return `本轮复核绑定 Head ${short(item.data?.head_sha, 10)}`;
+    case "review_observed": return "已核对到 Reviewer 的 GitHub 审核证据";
+    case "head_changed": return `检测到新提交 ${short(item.data?.sha, 10)}，旧 CI 与批准已失效`;
+    case "phase_changed": return `任务进入“${phaseNames[item.data?.to] || phaseNames[run.phase] || "下一阶段"}”`;
+    default: return humanMessage(item.message);
   }
 }
-
-async function selectRun(runId) {
-  state.selected = state.runs.find((run) => run.run_id === runId) || await api(`/api/runs/${runId}`);
-  state.events = (await api(`/api/runs/${runId}/events?after=0`)).events;
-  renderRuns(); renderDetail();
+function eventCard(run, item, latest = false) {
+  const card = node("article", `event${latest ? " latest" : ""}`);
+  if (latest) card.append(node("span", "latest-label", "最新"));
+  const actor = node("div", "actor");
+  actor.append(node("i", "", item.icon), node("span", "", item.name), node("small", "", `第 ${item.cycle} 轮`));
+  const main = node("div", "event-main");
+  main.append(node("b", "", item.title), node("span", "", eventMessage(run, item, latest)));
+  const status = node("span", "event-status", latest && !terminal.has(run.phase) && run.phase !== "paused" ? "处理中" : "已完成");
+  const timing = node("div", "timing");
+  timing.append(node("span", "", `开始 ${clock(item.at)}`));
+  if (latest && !terminal.has(run.phase) && run.phase !== "paused") timing.append(node("span", "live", `已运行 ${elapsed(run.phase_started_at || item.at)}`));
+  else timing.append(node("span", "", `用时 ${elapsed(item.at, item.data?.ended_at || item.at)}`));
+  const finding = item.type === "finding_validated" ? run.finding_history?.find((entry) => entry.version === item.data?.version || entry.validated_at === item.at) : undefined;
+  if (finding && !latest) {
+    const link = node("a", "zip-link", `finding-v${finding.version}.zip ↓`);
+    link.href = `${state.apiUrl}/api/runs/${run.run_id}/findings/${finding.version}/download`;
+    link.addEventListener("click", (event) => { event.preventDefault(); downloadFinding(run, finding); });
+    main.append(link);
+  }
+  card.append(actor, main, status, timing); return card;
+}
+function activityPanel(run) {
+  const wrap = node("div", "activity-wrap");
+  const panel = node("div", "activity");
+  const history = node("div", "history");
+  const inner = node("div", "history-inner");
+  const normalized = (state.events.get(run.run_id) || []).map((event) => normalizeEvent(run, event));
+  const visible = normalized.filter((item) => ["message_dispatched","agent_activity","finding_validated","github_delivery","ci_observed","review_cycle_started","review_observed","head_changed","phase_changed"].includes(item.type));
+  visible.forEach((item, index) => { item.data.ended_at ||= visible[index + 1]?.at || (terminal.has(run.phase) ? run.updated_at : undefined); });
+  const latest = terminal.has(run.phase) ? (visible.at(-1) || syntheticLatest(run)) : syntheticLatest(run);
+  visible.slice(0, terminal.has(run.phase) ? -1 : undefined).forEach((item) => inner.append(eventCard(run, item)));
+  if (!inner.childNodes.length) inner.append(eventCard(run, normalizeEvent(run, { type: "run_created", actor: "controller", phase: "queued", at: run.created_at, message: "Controller 已接管任务。", data: {} })));
+  history.append(inner); panel.append(history, eventCard(run, latest, true)); wrap.append(panel);
+  requestAnimationFrame(() => { history.scrollTop = history.scrollHeight; });
+  return wrap;
 }
 
-function openConnection() {
-  $("apiUrl").value = state.apiUrl;
-  $("operatorToken").value = state.token;
-  $("connectionDialog").showModal();
+function taskDetail(run) {
+  const detail = node("section", "detail");
+  const main = node("div"); main.append(node("h3", "", "完整任务要求"), node("p", "request-copy", run.request));
+  const finding = run.latest_finding;
+  if (finding) {
+    main.append(node("h3", "", `最新 Finding · v${finding.version}`));
+    main.lastChild.style.marginTop = "16px";
+    const loaded = state.findings.get(`${run.run_id}:${finding.version}`);
+    main.append(node("div", "finding-copy", loaded?.markdown || (loaded?.error ? `暂时无法读取：${loaded.error}` : "正在读取 FINDING.md…")));
+  }
+  const aside = node("aside"); aside.append(node("h3", "", "机械状态"));
+  const facts = node("dl", "facts");
+  [["Run",run.run_id],["仓库",run.repo],["基础分支",run.base_branch],["工作分支",run.branch],["Head",short(run.pr?.head_sha,14)],["等待",run.waiting_for]].forEach(([key,value]) => { const row=node("div"); row.append(node("dt","",key),node("dd","",value || "—")); facts.append(row); });
+  aside.append(facts); detail.append(main, aside); return detail;
 }
-
-function openNewRun() {
-  if (!state.token) { openConnection(); return; }
-  $("newRunDialog").showModal();
+function taskCard(run) {
+  const card = node("article", `task${terminal.has(run.phase) ? " terminal" : ""}${state.expanded.has(run.run_id) ? " open" : ""}`);
+  const head = node("header", "task-head");
+  const left = node("div"); left.append(node("div", "state", `${actorInfo(run).name} · ${phaseNames[run.phase] || "处理中"}`), node("h2", "", title(run.request)));
+  const meta = node("div", "task-meta"); meta.append(node("span", "", run.repo));
+  if (run.pr?.url) { const link=node("a","pr-link",`PR #${run.pr.number} · ${short(run.pr.head_sha)} ↗`); link.href=run.pr.url; link.target="_blank"; link.rel="noopener noreferrer"; meta.append(link); }
+  left.append(meta);
+  const end = terminal.has(run.phase) ? run.updated_at : "";
+  const total = node("div", "total"); total.append(node("span", "", end ? "任务总用时" : "已运行"), node("strong", "live-total", elapsed(run.created_at,end))); total.lastChild.dataset.start=run.created_at; total.lastChild.dataset.end=end;
+  head.append(left,total);
+  const body=node("div","task-body"); body.append(cycleGraphic(run),activityPanel(run));
+  const actions=node("div","task-actions");
+  const toggle=node("button","detail-toggle",state.expanded.has(run.run_id)?"收起任务详情 ↑":"查看任务要求与证据 ↓"); toggle.type="button";
+  toggle.addEventListener("click",async()=>{ if(state.expanded.has(run.run_id))state.expanded.delete(run.run_id);else state.expanded.add(run.run_id); render(); if(state.expanded.has(run.run_id)){await loadFinding(run);render();} });
+  const group=node("div","action-group");
+  if(run.phase === "paused" || ["blocked","blocked_auth","blocked_github_auth"].includes(run.phase)){const resume=node("button","","恢复");resume.onclick=()=>runAction(run,"resume");group.append(resume);}
+  else if(!terminal.has(run.phase)){const pause=node("button","","暂停");pause.onclick=()=>runAction(run,"pause");group.append(pause);}
+  if(!terminal.has(run.phase)){const reconcile=node("button","","立即核对");reconcile.onclick=()=>runAction(run,"reconcile");const cancel=node("button","danger","取消");cancel.onclick=()=>runAction(run,"cancel");group.append(reconcile,cancel);}
+  actions.append(toggle,group); card.append(head,body,actions); if(state.expanded.has(run.run_id))card.append(taskDetail(run)); return card;
 }
-
-$("connectionButton").addEventListener("click", openConnection);
-$("newRunButton").addEventListener("click", openNewRun);
-$("emptyStartButton").addEventListener("click", openNewRun);
-document.querySelectorAll(".close-button").forEach((button) => button.addEventListener("click", () => button.closest("dialog").close()));
-$("connectionForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  state.apiUrl = $("apiUrl").value.replace(/\/$/, "");
-  state.token = $("operatorToken").value;
-  try {
-    await api("/api/runs");
-    sessionStorage.setItem("catsloop.apiUrl", state.apiUrl);
-    sessionStorage.setItem("catsloop.operatorToken", state.token);
-    $("connectionDialog").close();
-    await refresh();
-  } catch (error) { toast(error.message); }
-});
-$("newRunForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  try {
-    const run = await api("/api/runs", { method: "POST", body: JSON.stringify({
-      request: $("request").value,
-      repo: $("repoInput").value,
-      base_branch: $("baseBranch").value,
-      monday_agent_uid: Number($("mondayUid").value),
-      developer_agent_uid: Number($("developerUid").value),
-    }) });
-    $("newRunDialog").close();
-    $("newRunForm").reset(); $("baseBranch").value = "main"; $("mondayUid").value = "553"; $("developerUid").value = "365";
-    await refresh(); await selectRun(run.run_id); toast("Run 已创建并排队");
-  } catch (error) { toast(error.message); }
-});
-
-for (const [id, action] of [["reconcileButton", "reconcile"], ["resumeButton", "resume"], ["cancelButton", "cancel"]]) {
-  $(id).addEventListener("click", async () => {
-    if (!state.selected) return;
-    try {
-      await api(`/api/runs/${state.selected.run_id}/${action}`, { method: "POST" });
-      await refresh(); toast(`${action} 已提交`);
-    } catch (error) { toast(error.message); }
-  });
+function matches(run){if(state.filter==="active")return active.has(run.phase);if(state.filter==="done")return terminal.has(run.phase);return true;}
+function render(){
+  $("runCount").textContent=state.runs.length; $("activeCount").textContent=state.runs.filter(r=>active.has(r.phase)).length; $("doneCount").textContent=state.runs.filter(r=>terminal.has(r.phase)).length;
+  const list=$("runList");list.replaceChildren();const runs=state.runs.filter(matches);
+  if(!runs.length){const empty=node("div","empty");empty.append(node("span","","00"),node("h2","",state.connected?"目前没有符合条件的任务":"连接后查看自迭代任务"),node("p","",state.connected?"在与 Saturday 的会话中明确要求启动自迭代，任务会出现在这里。":"Artifact 只展示和管理任务，不负责创建任务。"));list.append(empty);return;}
+  runs.forEach(run=>list.append(taskCard(run)));
 }
+async function loadEvents(run){try{const body=await api(`/api/runs/${run.run_id}/events?after=0`);state.events.set(run.run_id,body.events||[]);}catch{state.events.set(run.run_id,[]);}}
+async function loadFinding(run){const finding=run.latest_finding;if(!finding)return;const key=`${run.run_id}:${finding.version}`;if(state.findings.has(key))return;try{state.findings.set(key,await api(`/api/runs/${run.run_id}/findings/${finding.version}`));}catch(error){state.findings.set(key,{error:error.message});}}
+async function downloadFinding(run,finding){try{const response=await api(`/api/runs/${run.run_id}/findings/${finding.version}/download`,{},true);const url=URL.createObjectURL(await response.blob());const a=node("a");a.href=url;a.download=`finding-v${finding.version}.zip`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(error){toast(error.message);}}
+async function refresh(silent=false){if(state.refreshing||!state.token||!state.apiUrl)return;state.refreshing=true;try{const body=await api("/api/runs");state.runs=body.runs||[];await Promise.all(state.runs.map(loadEvents));setConnection(true,"已连接");$("lastSync").textContent=`更新于 ${clock(new Date().toISOString())}`;render();if(!silent)toast("状态已刷新");}catch(error){setConnection(false,"连接失败");if(!silent)toast(error.message);}finally{state.refreshing=false;}}
+async function runAction(run,action){if(action==="cancel"&&!confirm("确认取消这个任务？已有会话、PR 和历史文件都会保留。"))return;try{const updated=await api(`/api/runs/${run.run_id}/${action}`,{method:"POST"});const index=state.runs.findIndex(item=>item.run_id===run.run_id);if(index>=0)state.runs[index]=updated;await loadEvents(updated);render();toast(action==="pause"?"任务已软暂停":action==="resume"?"任务已恢复":action==="cancel"?"任务已取消":"核对完成");}catch(error){toast(error.message);}}
 
-if (state.token) refresh(); else openConnection();
-state.poller = setInterval(refresh, 5000);
+$("connectionButton").onclick=()=>{$("apiUrl").value=state.apiUrl;$("operatorToken").value=state.token;$("connectionDialog").showModal();};
+$("refreshButton").onclick=()=>refresh();
+document.querySelectorAll("[data-close]").forEach(button=>button.onclick=()=>button.closest("dialog").close());
+document.querySelectorAll("[data-filter]").forEach(button=>button.onclick=()=>{state.filter=button.dataset.filter;document.querySelectorAll("[data-filter]").forEach(item=>item.classList.toggle("active",item===button));render();});
+$("connectionForm").onsubmit=async(event)=>{event.preventDefault();state.apiUrl=$("apiUrl").value.trim().replace(/\/$/,"");state.token=$("operatorToken").value;sessionStorage.setItem("catsloop.apiUrl",state.apiUrl);sessionStorage.setItem("catsloop.operatorToken",state.token);$("connectionDialog").close();await refresh();};
+setInterval(()=>{document.querySelectorAll(".live-total").forEach(item=>item.textContent=elapsed(item.dataset.start,item.dataset.end));document.querySelectorAll(".timing .live").forEach(()=>{});},1000);
+setInterval(()=>refresh(true),5000);
+if(state.token&&state.apiUrl)refresh(true);else{setConnection(false,"未连接");render();}

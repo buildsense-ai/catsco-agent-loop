@@ -11,12 +11,41 @@ const TERMINAL = new Set<RunPhase>([
   "completed",
 ]);
 
+export interface CreationReceipt {
+  key: string;
+  fingerprint: string;
+  run_id: string;
+  created_at: string;
+}
+
 function normalizeRun(run: LoopRun, activityStallMs: number): void {
   if (!run.last_activity_at) run.last_activity_at = run.last_progress_at || run.updated_at || run.created_at;
   run.activity_state = computeActivityState(run, Date.now(), activityStallMs);
   run.review_progress_evidence_ids ??= [];
   run.finding_history ??= [];
   run.review_cycles ??= [];
+
+  for (const agent of [run.monday, run.developer]) {
+    if (!agent.turn_started_at && agent.last_prompt_key) {
+      const sentAt = run.receipts?.[agent.last_prompt_key]?.sent_at;
+      if (sentAt && (!agent.last_turn_ended_at || Date.parse(sentAt) > Date.parse(agent.last_turn_ended_at))) {
+        agent.turn_started_at = sentAt;
+      }
+    }
+  }
+  if (!run.phase_started_at) {
+    const effective = run.phase === "recovering" ? run.resume_phase : run.phase;
+    run.phase_started_at = effective === "monday_finding"
+      ? run.monday.turn_started_at
+      : effective === "developer_implementing"
+        ? run.developer.turn_started_at
+        : effective === "monday_review"
+          ? run.review_cycle?.requested_at || run.review_requested_at || run.monday.turn_started_at
+          : effective === "waiting_ci"
+            ? run.pr?.first_seen_at || run.ci?.observed_at
+            : undefined;
+    run.phase_started_at ??= run.updated_at || run.created_at;
+  }
 
   for (const finding of [run.latest_finding, run.pending_review_finding]) {
     if (finding && !run.finding_history.some((item) => item.id === finding.id)) run.finding_history.push(finding);
@@ -66,6 +95,28 @@ export class RunStore {
     await this.writeRun(run);
     await writeFile(join(dir, "request.md"), `${run.request.trim()}\n`, { encoding: "utf8", mode: 0o600 });
     await writeFile(join(dir, "events.jsonl"), "", { encoding: "utf8", flag: "a", mode: 0o600 });
+  }
+
+  async readCreationReceipt(key: string): Promise<CreationReceipt | undefined> {
+    const path = join(this.root, ".creation-receipts", `${key}.json`);
+    try {
+      return JSON.parse(await readFile(path, "utf8")) as CreationReceipt;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+  }
+
+  async writeCreationReceipt(receipt: CreationReceipt): Promise<void> {
+    const dir = join(this.root, ".creation-receipts");
+    const path = join(dir, `${receipt.key}.json`);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await writeFile(path, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  }
+
+  async removeRun(runId: string): Promise<void> {
+    const { rm } = await import("node:fs/promises");
+    await rm(this.runDir(runId), { recursive: true, force: true });
   }
 
   async writeRun(run: LoopRun): Promise<void> {

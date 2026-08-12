@@ -6,3 +6,4 @@ export * from "./github-client.js";
 export * from "./store.js";
 export * from "./types.js";
 export * from "./zip-validator.js";
+export * from "./finding-reader.js";

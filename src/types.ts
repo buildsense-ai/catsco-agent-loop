@@ -5,6 +5,7 @@ export type RunPhase =
   | "waiting_ci"
   | "monday_review"
   | "recovering"
+  | "paused"
   | "blocked"
   | "blocked_auth"
   | "blocked_github_auth"
@@ -32,6 +33,12 @@ export interface AgentTurnState {
   previous_episode_run_id?: string;
   episode?: EpisodeStatus;
   episode_observed_at?: string;
+  turn_started_at?: string;
+  last_message_at?: string;
+  last_episode_change_at?: string;
+  last_turn_started_at?: string;
+  last_turn_ended_at?: string;
+  last_turn_duration_ms?: number;
   episode_started: boolean;
   last_agent_seq?: number;
   last_observed_seq?: number;
@@ -112,7 +119,7 @@ export interface LoopRun {
   schema_version: 1 | 2;
   run_id: string;
   phase: RunPhase;
-  resume_phase?: Exclude<RunPhase, "recovering">;
+  resume_phase?: Exclude<RunPhase, "recovering" | "paused">;
   active_actor: Actor;
   waiting_for: string;
   iteration: number;
@@ -143,6 +150,7 @@ export interface LoopRun {
   paused_for_manual_message?: { topic_id: string; message_id: number; detected_at: string };
   created_at: string;
   updated_at: string;
+  phase_started_at?: string;
   activity_state: ActivityState;
   last_activity_at: string;
   last_progress_at: string;
@@ -167,6 +175,7 @@ export interface RunEvent {
 export interface CreateRunInput {
   request: string;
   repo: string;
+  idempotency_key?: string;
   base_branch?: string;
   monday_agent_uid?: number;
   developer_agent_uid?: number;

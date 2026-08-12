@@ -35,6 +35,7 @@ export CATSLOOP_OPERATOR_TOKEN=...
 loopctl start --repo buildsense-ai/example --base main --request "Implement ..."
 loopctl list
 loopctl status --run run_...
+loopctl pause --run run_...
 loopctl reconcile --run run_...
 loopctl resume --run run_...
 loopctl cancel --run run_...
@@ -43,6 +44,8 @@ loopctl cancel --run run_...
 ## Invariants
 
 - A run exists only after explicit `POST /api/runs` or `loopctl start`.
+- `POST /api/runs` accepts `request` and `repo`; if no base branch is supplied, Controller resolves the repository's actual default branch.
+- `Idempotency-Key` makes Run creation retry-safe. Reusing one key with different input is rejected.
 - Each run creates exactly one Monday Agent Task and one Developer Agent Task, then reuses their Topics.
 - Every logical send has a stable `client_msg_id`; retries cannot duplicate messages.
 - A new Episode run ID is expected after each continuation, while the Topic and Controller Run stay fixed.
@@ -80,12 +83,13 @@ POST /api/runs
 GET  /api/runs
 GET  /api/runs/:id
 GET  /api/runs/:id/events?after=<seq>
+POST /api/runs/:id/pause
 POST /api/runs/:id/resume
 POST /api/runs/:id/reconcile
 POST /api/runs/:id/cancel
 ```
 
-The static operator console is in `artifact/`. It contains no credentials; the operator supplies the API token at runtime and the browser holds it in `sessionStorage`.
+The static operator console is in `artifact/`. It displays and manages existing Runs but does not create them. It contains no credentials; the operator supplies the API token at runtime and the browser holds it in `sessionStorage`. Saturday's thin semantic entrypoint is packaged in `skills/start-agent-loop/`.
 
 ## Validation
 

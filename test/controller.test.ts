@@ -500,6 +500,7 @@ test("controlled-Agent message and Episode changes advance activity only once pe
   run = await ctx.store.readRun(run.run_id);
   const messageActivity = run.last_activity_at;
   assert.notEqual(messageActivity, old);
+  assert.equal(run.developer.last_message_at, messageActivity);
   assert.equal(run.last_progress_at, mechanicalProgress);
   await ctx.controller.tick();
   run = await ctx.store.readRun(run.run_id);
@@ -511,6 +512,7 @@ test("controlled-Agent message and Episode changes advance activity only once pe
   await ctx.controller.tick();
   run = await ctx.store.readRun(run.run_id);
   assert.notEqual(run.last_activity_at, old);
+  assert.equal(run.developer.last_episode_change_at, run.last_activity_at);
   assert.equal(run.activity_state, "active");
 
   run.last_activity_at = old;
@@ -520,6 +522,76 @@ test("controlled-Agent message and Episode changes advance activity only once pe
   run = await ctx.store.readRun(run.run_id);
   assert.notEqual(run.last_activity_at, old);
   assert.equal(run.activity_state, "quiet");
+});
+
+test("operator soft pause sends no message and resume continues the same Topic", async () => {
+  const ctx = await setup();
+  let run = await ctx.controller.createRun({ request: "work", repo: "acme/widget" });
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  const topicId = run.monday.topic_id!;
+  const messageCount = ctx.catsco.topics.get(topicId)!.messages.length;
+  run = await ctx.controller.pause(run.run_id);
+  assert.equal(run.phase, "paused");
+  assert.equal(run.resume_phase, "monday_finding");
+  assert.equal(run.active_actor, "none");
+  assert.equal(ctx.catsco.topics.get(topicId)!.messages.length, messageCount, "pause must not send an Agent message");
+  await ctx.controller.tick();
+  assert.equal((await ctx.store.readRun(run.run_id)).phase, "paused", "scheduler must leave paused Runs untouched");
+  run = await ctx.controller.resume(run.run_id);
+  assert.equal(run.phase, "monday_finding");
+  assert.equal(run.monday.topic_id, topicId);
+  assert.equal(ctx.catsco.topics.get(topicId)!.messages.length, messageCount, "resume reconciles before any later continuation");
+});
+
+test("a softly paused Run does not consume the active execution slot", async () => {
+  const ctx = await setup();
+  let first = await ctx.controller.createRun({ request: "first", repo: "acme/widget" });
+  await ctx.controller.tick();
+  first = await ctx.store.readRun(first.run_id);
+  assert.equal(first.phase, "monday_finding");
+  const second = await ctx.controller.createRun({ request: "second", repo: "acme/widget" });
+  await ctx.controller.pause(first.run_id);
+  await ctx.controller.tick();
+  assert.equal((await ctx.store.readRun(first.run_id)).phase, "paused");
+  assert.equal((await ctx.store.readRun(second.run_id)).phase, "monday_finding");
+});
+
+test("createRun is idempotent and resolves the repository default branch", async () => {
+  const ctx = await setup();
+  ctx.github.defaultBranch = "develop";
+  const first = await ctx.controller.createRun({ request: "work", repo: "acme/widget", idempotency_key: "cats-message-12345" });
+  const repeated = await ctx.controller.createRun({ request: "work", repo: "acme/widget", idempotency_key: "cats-message-12345" });
+  assert.equal(first.run_id, repeated.run_id);
+  assert.equal(first.base_branch, "develop");
+  assert.equal((await ctx.store.listRuns()).length, 1);
+  await assert.rejects(
+    ctx.controller.createRun({ request: "different work", repo: "acme/widget", idempotency_key: "cats-message-12345" }),
+    /different request/,
+  );
+});
+
+test("role turns retain start, message activity, and completed duration across handoff", async () => {
+  const ctx = await setup();
+  let run = await advanceToDeveloper(ctx);
+  assert.ok(run.monday.last_turn_started_at);
+  assert.ok(run.monday.last_turn_ended_at);
+  assert.ok((run.monday.last_turn_duration_ms ?? -1) >= 0);
+  assert.ok(run.developer.turn_started_at);
+  assert.ok(run.phase_started_at);
+
+  const developerStart = run.developer.turn_started_at;
+  ctx.github.pr = { number: 42, url: "https://github.com/acme/widget/pull/42", state: "OPEN", base_ref: "main", head_ref: run.branch, head_sha: "abc123", author_login: "developer", head_repository: "acme/widget", head_repository_owner: "acme", first_seen_at: new Date().toISOString() };
+  ctx.catsco.agentReply(run.developer.topic_id!, "PR ready");
+  ctx.catsco.finish(run.developer.topic_id!);
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  assert.equal(run.phase, "waiting_ci");
+  assert.equal(run.developer.turn_started_at, undefined);
+  assert.equal(run.developer.last_turn_started_at, developerStart);
+  assert.ok(run.developer.last_message_at);
+  assert.ok(run.developer.last_turn_ended_at);
+  assert.ok((run.developer.last_turn_duration_ms ?? -1) >= 0);
 });
 
 test("absolute Run limit blocks a running Episode", async () => {
