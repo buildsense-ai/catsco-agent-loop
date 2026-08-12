@@ -11,6 +11,13 @@ const TERMINAL = new Set<RunPhase>([
   "completed",
 ]);
 
+export interface CreationReceipt {
+  key: string;
+  fingerprint: string;
+  run_id: string;
+  created_at: string;
+}
+
 function normalizeRun(run: LoopRun, activityStallMs: number): void {
   if (!run.last_activity_at) run.last_activity_at = run.last_progress_at || run.updated_at || run.created_at;
   run.activity_state = computeActivityState(run, Date.now(), activityStallMs);
@@ -88,6 +95,28 @@ export class RunStore {
     await this.writeRun(run);
     await writeFile(join(dir, "request.md"), `${run.request.trim()}\n`, { encoding: "utf8", mode: 0o600 });
     await writeFile(join(dir, "events.jsonl"), "", { encoding: "utf8", flag: "a", mode: 0o600 });
+  }
+
+  async readCreationReceipt(key: string): Promise<CreationReceipt | undefined> {
+    const path = join(this.root, ".creation-receipts", `${key}.json`);
+    try {
+      return JSON.parse(await readFile(path, "utf8")) as CreationReceipt;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+  }
+
+  async writeCreationReceipt(receipt: CreationReceipt): Promise<void> {
+    const dir = join(this.root, ".creation-receipts");
+    const path = join(dir, `${receipt.key}.json`);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await writeFile(path, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  }
+
+  async removeRun(runId: string): Promise<void> {
+    const { rm } = await import("node:fs/promises");
+    await rm(this.runDir(runId), { recursive: true, force: true });
   }
 
   async writeRun(run: LoopRun): Promise<void> {

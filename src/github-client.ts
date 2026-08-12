@@ -7,6 +7,7 @@ const execFileAsync = promisify(execFile);
 
 export interface IGithubClient {
   validate(repo: string): Promise<{ login: string }>;
+  getDefaultBranch(repo: string): Promise<string>;
   findPullRequest(repo: string, branch: string, base: string): Promise<PullRequestState | undefined>;
   getCi(repo: string, sha: string, previous?: CiSummary): Promise<CiSummary>;
   getReviewEvidence(repo: string, pr: number): Promise<ReviewEvidence[]>;
@@ -39,6 +40,19 @@ export class GithubClient implements IGithubClient {
       return { login: user.login };
     } catch (error) {
       throw new GithubAuthError(`GitHub startup check failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  async getDefaultBranch(repo: string): Promise<string> {
+    try {
+      const output = await this.gh(["repo", "view", repo, "--json", "defaultBranchRef"]);
+      const data = JSON.parse(output) as { defaultBranchRef?: { name?: string } };
+      const branch = data.defaultBranchRef?.name?.trim();
+      if (!branch) throw new Error("default branch missing");
+      return branch;
+    } catch (error) {
+      if (error instanceof GithubAuthError) throw error;
+      throw new LoopError(`Cannot resolve default branch for ${repo}: ${error instanceof Error ? error.message : String(error)}`, "github_default_branch", true);
     }
   }
 

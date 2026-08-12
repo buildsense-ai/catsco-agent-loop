@@ -3,7 +3,7 @@ import type { AgentTurnState, LoopRun, RunPhase } from "./types.js";
 export const DEFAULT_ACTIVITY_STALL_MS = 20 * 60_000;
 
 const AGENT_PHASES = new Set<RunPhase>(["monday_finding", "developer_implementing", "monday_review"]);
-const TERMINAL_PHASES = new Set<RunPhase>(["blocked", "blocked_auth", "blocked_github_auth", "cancelled", "completed"]);
+const TERMINAL_PHASES = new Set<RunPhase>(["paused", "blocked", "blocked_auth", "blocked_github_auth", "cancelled", "completed"]);
 
 export function activityAgent(run: LoopRun): AgentTurnState | undefined {
   if (TERMINAL_PHASES.has(run.phase)) return undefined;

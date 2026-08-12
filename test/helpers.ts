@@ -94,8 +94,10 @@ export class FakeGithub implements IGithubClient {
   findCalls = 0;
   ciCalls = 0;
   reviewCalls = 0;
+  defaultBranch = "main";
 
   async validate() { this.validateCalls += 1; return { login: "controller" }; }
+  async getDefaultBranch() { return this.defaultBranch; }
   async findPullRequest() { this.findCalls += 1; return this.pr ? { ...this.pr } : undefined; }
   async getCi(_repo: string, sha: string) { this.ciCalls += 1; return { ...this.ci, sha }; }
   async getReviewEvidence() { this.reviewCalls += 1; return [...this.evidence]; }

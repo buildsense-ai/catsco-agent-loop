@@ -4,76 +4,43 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
-  <meta name="description" content="双智能体自迭代任务台">
+  <meta name="description" content="Saturday 自迭代任务进度">
   <title>自迭代任务台</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="#" aria-label="自迭代任务台首页">
-      <span class="brand-mark" aria-hidden="true"><i></i><i></i></span>
-      <span><b>自迭代任务台</b><small>问题发现 · 开发实现 · 审核收束</small></span>
-    </a>
-    <div class="topbar-actions">
-      <span class="connection-state" id="connectionState" data-state="offline"><i></i><b id="healthText">未连接</b></span>
-      <button class="icon-button" id="connectionButton" type="button" aria-label="连接设置" title="连接设置">⌘</button>
-      <button class="primary-button" id="newRunButton" type="button"><span>＋</span> 新建任务</button>
-    </div>
-  </header>
-
-  <main class="page-shell">
-    <section class="page-intro">
+  <main class="page">
+    <header class="masthead">
       <div>
-        <p>任务总览</p>
-        <h1>每个问题，沿着同一条链路走到批准。</h1>
+        <p class="eyebrow">SATURDAY · AGENT LOOP</p>
+        <h1>自迭代任务台</h1>
+        <p class="lead">审查、开发与验证沿同一条任务链持续推进，直到当前提交被批准。</p>
       </div>
-      <div class="summary-counts" aria-label="任务统计">
-        <span><i class="active-dot"></i>进行中 <b id="activeCount">0</b></span>
-        <span><i class="done-dot"></i>已结束 <b id="doneCount">0</b></span>
+      <div class="head-actions">
+        <span class="connection" id="connectionState" data-state="offline"><i></i><b id="healthText">未连接</b></span>
+        <button class="quiet-button" id="connectionButton" type="button">连接设置</button>
       </div>
-    </section>
+    </header>
 
-    <section class="task-toolbar">
+    <section class="toolbar">
       <div class="filters" role="group" aria-label="任务筛选">
-        <button class="active" type="button" data-filter="all">全部任务</button>
-        <button type="button" data-filter="active">正在处理</button>
-        <button type="button" data-filter="done">已经结束</button>
+        <button class="active" type="button" data-filter="all">全部 <b id="runCount">0</b></button>
+        <button type="button" data-filter="active">处理中 <b id="activeCount">0</b></button>
+        <button type="button" data-filter="done">已结束 <b id="doneCount">0</b></button>
       </div>
-      <div class="toolbar-note"><span id="runCount">0 个任务</span><i></i><time id="lastSync">尚未同步</time><button id="refreshButton" type="button">刷新</button></div>
+      <div class="sync"><time id="lastSync">尚未同步</time><button id="refreshButton" type="button">刷新</button></div>
     </section>
 
-    <section class="task-list" id="runList" aria-live="polite">
-      <div class="empty-state" id="emptyState">
-        <span>01</span>
-        <h2>还没有进入循环的任务</h2>
-        <p>只有从这里明确创建的任务才会启动双智能体自迭代；普通会话和普通 ZIP 不会被接管。</p>
-        <button class="primary-button" id="emptyStartButton" type="button">新建第一个任务</button>
-      </div>
-    </section>
+    <section class="tasks" id="runList" aria-live="polite"></section>
   </main>
 
   <dialog id="connectionDialog">
     <form class="dialog-card" id="connectionForm">
-      <div class="dialog-head"><div><small>安全连接</small><h2>连接任务调度器</h2></div><button type="button" class="dialog-close" data-close>×</button></div>
+      <header><div><small>安全连接</small><h2>连接 Loop Controller</h2></div><button type="button" data-close aria-label="关闭">×</button></header>
       <label>接口地址<input id="apiUrl" type="url" required placeholder="https://example.com:19993"></label>
       <label>操作员令牌<input id="operatorToken" type="password" autocomplete="off" required></label>
-      <p class="dialog-note">令牌只保存在当前标签页，不写入页面文件。</p>
-      <div class="dialog-actions"><button class="primary-button" type="submit">验证并连接</button></div>
-    </form>
-  </dialog>
-
-  <dialog id="newRunDialog" class="wide-dialog">
-    <form class="dialog-card" id="newRunForm">
-      <div class="dialog-head"><div><small>明确启动</small><h2>新建自迭代任务</h2></div><button type="button" class="dialog-close" data-close>×</button></div>
-      <label>需要解决的问题<textarea id="requestInput" rows="7" required placeholder="用自然语言说明实现要求、验收标准和不能做的事。"></textarea></label>
-      <div class="field-grid">
-        <label>GitHub 仓库<input id="repoInput" required placeholder="owner/repository"></label>
-        <label>基础分支<input id="baseBranchInput" required value="main"></label>
-        <label>审查者 UID<input id="mondayUidInput" type="number" min="1" required value="553"></label>
-        <label>开发者 UID<input id="developerUidInput" type="number" min="1" required value="365"></label>
-      </div>
-      <p class="dialog-note">创建后才会建立两条受控会话。调度器只核对交付，不代替智能体评论、批准或合并 PR。</p>
-      <div class="dialog-actions"><button class="primary-button" type="submit">创建并开始</button></div>
+      <p>令牌只保留在当前浏览器标签页的 sessionStorage 中。</p>
+      <button class="primary-button" type="submit">验证并连接</button>
     </form>
   </dialog>
 

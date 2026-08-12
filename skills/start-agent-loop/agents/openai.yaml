@@ -1,0 +1,4 @@
+interface:
+  display_name: "启动自迭代"
+  short_description: "由 Saturday 明确确认用户意图后启动双 Agent 自迭代任务"
+  default_prompt: "根据当前对话判断是否应启动自迭代；意图明确时创建任务，不确定时先向用户确认。"

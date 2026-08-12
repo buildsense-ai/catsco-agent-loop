@@ -524,6 +524,53 @@ test("controlled-Agent message and Episode changes advance activity only once pe
   assert.equal(run.activity_state, "quiet");
 });
 
+test("operator soft pause sends no message and resume continues the same Topic", async () => {
+  const ctx = await setup();
+  let run = await ctx.controller.createRun({ request: "work", repo: "acme/widget" });
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  const topicId = run.monday.topic_id!;
+  const messageCount = ctx.catsco.topics.get(topicId)!.messages.length;
+  run = await ctx.controller.pause(run.run_id);
+  assert.equal(run.phase, "paused");
+  assert.equal(run.resume_phase, "monday_finding");
+  assert.equal(run.active_actor, "none");
+  assert.equal(ctx.catsco.topics.get(topicId)!.messages.length, messageCount, "pause must not send an Agent message");
+  await ctx.controller.tick();
+  assert.equal((await ctx.store.readRun(run.run_id)).phase, "paused", "scheduler must leave paused Runs untouched");
+  run = await ctx.controller.resume(run.run_id);
+  assert.equal(run.phase, "monday_finding");
+  assert.equal(run.monday.topic_id, topicId);
+  assert.equal(ctx.catsco.topics.get(topicId)!.messages.length, messageCount, "resume reconciles before any later continuation");
+});
+
+test("a softly paused Run does not consume the active execution slot", async () => {
+  const ctx = await setup();
+  let first = await ctx.controller.createRun({ request: "first", repo: "acme/widget" });
+  await ctx.controller.tick();
+  first = await ctx.store.readRun(first.run_id);
+  assert.equal(first.phase, "monday_finding");
+  const second = await ctx.controller.createRun({ request: "second", repo: "acme/widget" });
+  await ctx.controller.pause(first.run_id);
+  await ctx.controller.tick();
+  assert.equal((await ctx.store.readRun(first.run_id)).phase, "paused");
+  assert.equal((await ctx.store.readRun(second.run_id)).phase, "monday_finding");
+});
+
+test("createRun is idempotent and resolves the repository default branch", async () => {
+  const ctx = await setup();
+  ctx.github.defaultBranch = "develop";
+  const first = await ctx.controller.createRun({ request: "work", repo: "acme/widget", idempotency_key: "cats-message-12345" });
+  const repeated = await ctx.controller.createRun({ request: "work", repo: "acme/widget", idempotency_key: "cats-message-12345" });
+  assert.equal(first.run_id, repeated.run_id);
+  assert.equal(first.base_branch, "develop");
+  assert.equal((await ctx.store.listRuns()).length, 1);
+  await assert.rejects(
+    ctx.controller.createRun({ request: "different work", repo: "acme/widget", idempotency_key: "cats-message-12345" }),
+    /different request/,
+  );
+});
+
 test("role turns retain start, message activity, and completed duration across handoff", async () => {
   const ctx = await setup();
   let run = await advanceToDeveloper(ctx);

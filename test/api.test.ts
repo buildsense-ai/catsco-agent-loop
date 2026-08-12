@@ -138,6 +138,32 @@ test("API requires operator token, enforces exact CORS origin, and discloses Run
   }
 });
 
+test("API forwards idempotency keys and exposes soft pause", async () => {
+  const root = await mkdtemp(join(tmpdir(), "catsloop-api-actions-"));
+  const store = new RunStore(root);
+  const run = runFixture();
+  run.run_id = "run_api_actions";
+  run.branch = "loop/run_api_actions";
+  await store.initialize(run);
+  const calls: Array<{ kind: string; value?: string }> = [];
+  const controller = {
+    config: { operatorToken: "secret", allowedOrigin: "https://artifact.example:19991" },
+    createRun: async (input: { idempotency_key?: string }) => { calls.push({ kind: "create", value: input.idempotency_key }); return run; },
+    pause: async (runId: string) => { calls.push({ kind: "pause", value: runId }); return { ...run, phase: "paused" }; },
+  } as unknown as LoopController;
+  const api = createLoopApi(controller, store);
+  const address = await api.listen("127.0.0.1", 0);
+  const base = `http://127.0.0.1:${address.port}`;
+  const headers = { authorization: "Bearer secret", "content-type": "application/json", "idempotency-key": "cats-message-42" };
+  try {
+    assert.equal((await fetch(`${base}/api/runs`, { method: "POST", headers, body: JSON.stringify({ request: "work", repo: "acme/widget" }) })).status, 201);
+    assert.equal((await fetch(`${base}/api/runs/${run.run_id}/pause`, { method: "POST", headers: { authorization: "Bearer secret" } })).status, 200);
+    assert.deepEqual(calls, [{ kind: "create", value: "cats-message-42" }, { kind: "pause", value: run.run_id }]);
+  } finally {
+    await api.close();
+  }
+});
+
 test("API exposes validated Finding markdown and authenticated ZIP download", async () => {
   const root = await mkdtemp(join(tmpdir(), "catsloop-api-finding-"));
   const store = new RunStore(root);

@@ -5,6 +5,7 @@ export type RunPhase =
   | "waiting_ci"
   | "monday_review"
   | "recovering"
+  | "paused"
   | "blocked"
   | "blocked_auth"
   | "blocked_github_auth"
@@ -118,7 +119,7 @@ export interface LoopRun {
   schema_version: 1 | 2;
   run_id: string;
   phase: RunPhase;
-  resume_phase?: Exclude<RunPhase, "recovering">;
+  resume_phase?: Exclude<RunPhase, "recovering" | "paused">;
   active_actor: Actor;
   waiting_for: string;
   iteration: number;
@@ -174,6 +175,7 @@ export interface RunEvent {
 export interface CreateRunInput {
   request: string;
   repo: string;
+  idempotency_key?: string;
   base_branch?: string;
   monday_agent_uid?: number;
   developer_agent_uid?: number;

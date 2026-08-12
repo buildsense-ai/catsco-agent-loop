@@ -12,13 +12,13 @@ function required(name: string): string {
   return value;
 }
 
-async function request(path: string, method = "GET", body?: unknown): Promise<unknown> {
+async function request(path: string, method = "GET", body?: unknown, idempotencyKey?: string): Promise<unknown> {
   const base = process.env.CATSLOOP_API_URL ?? "http://127.0.0.1:19992";
   const token = process.env.CATSLOOP_OPERATOR_TOKEN;
   if (!token) throw new Error("CATSLOOP_OPERATOR_TOKEN is required");
   const response = await fetch(new URL(path, base), {
     method,
-    headers: { authorization: `Bearer ${token}`, ...(body ? { "content-type": "application/json" } : {}) },
+    headers: { authorization: `Bearer ${token}`, ...(body ? { "content-type": "application/json" } : {}), ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   const data = await response.json();
@@ -35,19 +35,20 @@ async function main(): Promise<void> {
       result = await request("/api/runs", "POST", {
         request: requestText,
         repo: required("repo"),
-        base_branch: option("base") ?? "main",
+        ...(option("base") ? { base_branch: option("base") } : {}),
         ...(option("monday-uid") ? { monday_agent_uid: Number(option("monday-uid")) } : {}),
         ...(option("developer-uid") ? { developer_agent_uid: Number(option("developer-uid")) } : {}),
-      });
+      }, option("idempotency-key"));
       break;
     }
     case "list": result = await request("/api/runs"); break;
     case "status": result = await request(`/api/runs/${required("run")}`); break;
+    case "pause": result = await request(`/api/runs/${required("run")}/pause`, "POST"); break;
     case "resume": result = await request(`/api/runs/${required("run")}/resume`, "POST"); break;
     case "reconcile": result = await request(`/api/runs/${required("run")}/reconcile`, "POST"); break;
     case "cancel": result = await request(`/api/runs/${required("run")}/cancel`, "POST"); break;
     default:
-      throw new Error("Usage: loopctl start|list|status|resume|reconcile|cancel [options]");
+      throw new Error("Usage: loopctl start|list|status|pause|resume|reconcile|cancel [options]");
   }
   console.log(JSON.stringify(result, null, 2));
 }

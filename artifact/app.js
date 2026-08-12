@@ -1,696 +1,246 @@
-const defaultApiUrl = location.protocol === "https:"
-  ? `${location.protocol}//${location.hostname}:19993`
-  : "http://127.0.0.1:19992";
-
-const state = {
-  apiUrl: sessionStorage.getItem("catsloop.apiUrl") || defaultApiUrl,
-  token: sessionStorage.getItem("catsloop.operatorToken") || "",
-  runs: [],
-  filter: "all",
-  connected: false,
-  refreshing: false,
-  expanded: new Set(),
-  events: new Map(),
-  eventCursors: new Map(),
-  findings: new Map(),
-};
-
-const terminalPhases = new Set(["completed", "cancelled", "blocked", "blocked_auth", "blocked_github_auth"]);
-const activePhases = new Set(["queued", "monday_finding", "developer_implementing", "waiting_ci", "monday_review", "recovering"]);
-const phaseLabels = {
-  queued: "等待调度",
-  monday_finding: "审查者正在调查",
-  developer_implementing: "开发者正在实现",
-  waiting_ci: "正在验证 CI",
-  monday_review: "审查者正在复核",
-  recovering: "正在恢复任务",
-  blocked: "任务已阻塞",
-  blocked_auth: "会话认证阻塞",
-  blocked_github_auth: "GitHub 认证阻塞",
-  cancelled: "任务已取消",
-  completed: "已批准，循环结束",
-};
-const cycleLabels = {
-  active: "复核中",
-  revision_requested: "需要修改",
-  approved: "已批准",
-  superseded: "已归档",
-};
-const ciLabels = { pending: "检查中", success: "已通过", failure: "未通过", none: "尚未开始" };
-const episodeLabels = { running: "运行中", waiting: "等待中", completed: "已结束", failed: "失败", cancelled: "已取消", stale: "状态过期" };
-const eventLabels = {
-  run_created: "任务已创建",
-  message_dispatched: "任务消息已发送",
-  phase_changed: "处理阶段已推进",
-  agent_activity: "智能体有新进展",
-  finding_validated: "发现报告 ZIP 已验证",
-  github_delivery: "已发现 PR 交付",
-  ci_observed: "CI 状态已更新",
-  review_cycle_started: "新一轮复核已开始",
-  review_observed: "已发现审核证据",
-  controller_restarted: "调度器已重启",
-  head_changed: "PR 出现新提交",
-  run_resumed: "任务已恢复",
-  recovery_scheduled: "已安排恢复尝试",
-  run_cancelled: "任务已取消",
-};
-
 const $ = (id) => document.getElementById(id);
+const state = {
+  apiUrl: sessionStorage.getItem("catsloop.apiUrl") || "",
+  token: sessionStorage.getItem("catsloop.operatorToken") || "",
+  runs: [], events: new Map(), findings: new Map(), expanded: new Set(),
+  filter: "all", connected: false, refreshing: false,
+};
+const terminal = new Set(["completed", "cancelled", "blocked", "blocked_auth", "blocked_github_auth"]);
+const active = new Set(["queued", "monday_finding", "developer_implementing", "waiting_ci", "monday_review", "recovering", "paused"]);
+const phaseNames = {
+  queued: "排队中", monday_finding: "审查中", developer_implementing: "开发中", waiting_ci: "验证中",
+  monday_review: "复核中", recovering: "正在恢复", paused: "已暂停", blocked: "需要处理",
+  blocked_auth: "登录失效", blocked_github_auth: "GitHub 登录失效", cancelled: "已取消", completed: "已完成",
+};
+const eventNames = {
+  run_created: "任务已创建", message_dispatched: "已交给智能体", agent_activity: "收到新进展",
+  finding_validated: "Finding ZIP 已验证", github_delivery: "发现 Pull Request", ci_observed: "CI 状态已更新",
+  review_cycle_started: "开始新一轮复核", review_observed: "收到 GitHub 审核", head_changed: "检测到新提交",
+  phase_changed: "阶段已切换", controller_restarted: "Controller 已恢复", reconcile_error: "核对暂时失败",
+  activity_state_changed: "活动状态已变化", finding_rejected: "Finding ZIP 未通过验证",
+};
+let toastTimer;
 
-function create(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
+function node(tag, className = "", text = "") {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text !== "") element.textContent = text;
+  return element;
 }
-
-function setText(id, value, fallback = "—") {
-  $(id).textContent = value === undefined || value === null || value === "" ? fallback : String(value);
+function setConnection(value, label) {
+  state.connected = value;
+  $("connectionState").dataset.state = value ? "online" : "offline";
+  $("healthText").textContent = label;
 }
-
-function short(value, length = 10) {
-  if (!value) return "—";
-  return value.length > length ? value.slice(0, length) : value;
+function toast(message) {
+  $("toast").textContent = message;
+  $("toast").classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("toast").classList.remove("show"), 2200);
 }
-
-function taskTitle(request) {
-  const normalized = String(request || "未命名任务").replace(/\s+/g, " ").trim();
-  const first = normalized.match(/^.*?[。！？!?](?:\s|$)|^.*?\.(?:\s|$)/)?.[0]?.trim();
-  const value = first && first.length >= 10 ? first : normalized;
-  return value.length > 74 ? `${value.slice(0, 71).trim()}…` : value;
-}
-
-function age(value) {
-  if (!value) return "—";
-  const ms = Date.now() - Date.parse(value);
+function elapsed(start, end = "") {
+  if (!start) return "—";
+  const ms = Math.max(0, Date.parse(end || new Date().toISOString()) - Date.parse(start));
   if (!Number.isFinite(ms)) return "—";
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  if (seconds < 10) return "刚刚";
-  if (seconds < 60) return `${seconds} 秒前`;
+  const hours = Math.floor(ms / 3600000);
+  const minutes = Math.floor(ms % 3600000 / 60000);
+  const seconds = Math.floor(ms % 60000 / 1000);
+  return `${hours ? `${String(hours).padStart(2,"0")}:` : ""}${String(minutes).padStart(2,"0")}:${String(seconds).padStart(2,"0")}`;
+}
+function clock(value) {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
+}
+function age(value) {
+  const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1000));
+  if (!Number.isFinite(seconds)) return "未知";
+  if (seconds < 60) return seconds < 8 ? "刚刚" : `${seconds} 秒前`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
   return `${Math.floor(seconds / 86400)} 天前`;
 }
+function short(value, length = 9) { return value ? String(value).slice(0, length) : "—"; }
+function title(request) { return String(request || "未命名任务").replace(/\s+/g, " ").trim(); }
 
-function clock(value) {
-  if (!value) return "—";
-  return new Date(value).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-}
-
-function durationText(start, end) {
-  const elapsed = Math.max(0, Date.parse(end || new Date().toISOString()) - Date.parse(start));
-  if (!Number.isFinite(elapsed)) return "—";
-  const seconds = Math.floor(elapsed / 1000);
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const rest = seconds % 60;
-  return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}` : `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
-}
-
-function effectivePhase(run) {
-  return run.phase === "recovering" && run.resume_phase ? run.resume_phase : run.phase;
-}
-
-function stageIndex(run) {
-  if (run.phase === "completed") return 5;
-  return { queued: 0, monday_finding: 1, developer_implementing: 2, waiting_ci: 3, monday_review: 4 }[effectivePhase(run)] ?? 0;
-}
-
-function setConnection(connected, label) {
-  state.connected = connected;
-  $("connectionState").dataset.state = connected ? "online" : "offline";
-  setText("healthText", label, connected ? "已连接" : "未连接");
-}
-
-function toast(message, kind = "ok") {
-  const node = $("toast");
-  node.textContent = message;
-  node.classList.toggle("error", kind === "error");
-  node.classList.add("show");
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => node.classList.remove("show"), 3200);
-}
-
-async function request(path, options = {}, expectJson = true) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12_000);
-  try {
-    const response = await fetch(new URL(path, `${state.apiUrl.replace(/\/$/, "")}/`), {
-      ...options,
-      signal: controller.signal,
-      headers: {
-        authorization: `Bearer ${state.token}`,
-        ...(options.body ? { "content-type": "application/json" } : {}),
-        ...options.headers,
-      },
-    });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      const error = new Error(body.error || `请求失败（${response.status}）`);
-      error.status = response.status;
-      throw error;
-    }
-    return expectJson ? await response.json() : response;
-  } catch (error) {
-    if (error.name === "AbortError") throw new Error("调度器响应超时");
-    throw error;
-  } finally {
-    clearTimeout(timeout);
+async function api(path, options = {}, raw = false) {
+  const response = await fetch(new URL(path, state.apiUrl), {
+    ...options,
+    headers: { authorization: `Bearer ${state.token}`, ...(options.body ? { "content-type": "application/json" } : {}), ...(options.headers || {}) },
+  });
+  if (raw) {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response;
   }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
 }
 
-function handleError(error, silent = false) {
-  setConnection(false, error.status === 401 ? "令牌无效" : "连接异常");
-  if (!silent) toast(error.message || String(error), "error");
-  if (error.status === 401 && !$("connectionDialog").open) openConnection();
-}
-
-function runMatchesFilter(run) {
-  if (state.filter === "active") return activePhases.has(run.phase);
-  if (state.filter === "done") return terminalPhases.has(run.phase);
-  return true;
-}
-
-function actorStatus(run) {
-  if (run.phase === "recovering") return "调度器正在尝试恢复";
-  return phaseLabels[run.phase] || "正在处理";
-}
-
-function waitingText(run) {
-  if (run.phase === "queued") return "等待可用执行位置";
-  if (run.phase === "monday_finding") return "等待发现报告 ZIP";
-  if (run.phase === "developer_implementing") return run.pr ? "等待 PR 的新提交" : "等待开发者创建 PR";
-  if (run.phase === "waiting_ci") return "等待当前提交通过 CI";
-  if (run.phase === "monday_review") return "等待批准，或评论与新发现报告";
-  if (run.phase === "completed") return "当前提交已经批准，PR 保持未合并";
-  if (run.phase === "cancelled") return "任务已经停止，历史信息仍然保留";
-  if (run.phase.startsWith("blocked")) return run.last_error || "需要人工处理后恢复";
-  return "正在核对最新状态";
-}
-
-function formatDurationMs(value) {
-  if (!Number.isFinite(value)) return "—";
-  const seconds = Math.max(0, Math.floor(value / 1000));
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const rest = seconds % 60;
-  return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}` : `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
-}
-
-function activeRole(run, role) {
+function effectivePhase(run) { return run.phase === "recovering" || run.phase === "paused" ? run.resume_phase || run.phase : run.phase; }
+function actorInfo(run) {
   const phase = effectivePhase(run);
-  return role === "reviewer"
-    ? phase === "monday_finding" || phase === "monday_review"
-    : phase === "developer_implementing";
+  if (run.phase === "paused") return { name: "Controller", icon: "II", label: "已暂停", index: phase === "developer_implementing" ? 1 : phase === "waiting_ci" ? 2 : 0 };
+  if (phase === "developer_implementing") return { name: "Developer", icon: "DEV", label: "开发中", index: 1 };
+  if (phase === "waiting_ci") return { name: "自动检查", icon: "CI", label: "验证中", index: 2 };
+  if (phase === "monday_finding" || phase === "monday_review") return { name: "Reviewer", icon: "REV", label: phase === "monday_review" ? "复核中" : "审查中", index: 0 };
+  return { name: "Controller", icon: "CTL", label: phaseNames[run.phase] || "处理中", index: 0 };
+}
+function cycleGraphic(run) {
+  const info = actorInfo(run);
+  const box = node("div", "cycle-panel");
+  const cycle = node("div", "cycle");
+  cycle.innerHTML = `<svg viewBox="0 0 170 170" aria-label="当前处于${info.label}">
+    <path class="arc ${info.index > 0 ? "done" : info.index < 0 ? "next" : ""}" d="M85 22 A63 63 0 0 1 140 116"/>
+    <path class="arrow" d="M137.1 120.8 L145.9 115.5 L137.3 110.5 Z"/>
+    <path class="arc ${info.index > 1 ? "done" : info.index < 1 ? "next" : ""}" d="M132 128 A63 63 0 0 1 38 128"/>
+    <path class="arrow" d="M34.6 124.3 L37 134.3 L44.4 127.5 Z"/>
+    <path class="arc ${info.index > 2 ? "done" : info.index < 2 ? "next" : ""}" d="M30 116 A63 63 0 0 1 73 23"/>
+    <path class="arrow" d="M77.9 22 L68.1 18.9 L70 28.7 Z"/>
+  </svg>`;
+  const copy = node("div", "cycle-copy");
+  copy.append(node("small", "", "当前轮次"), node("strong", "", String(Math.max(1, (run.iteration || 0) + 1)).padStart(2, "0")), node("b", "", info.label));
+  const pills = node("div", "phase-pills");
+  ["Reviewer", "Developer", "CI"].forEach((label, index) => pills.append(node("span", index === info.index ? "active" : "", label)));
+  cycle.append(copy, pills); box.append(cycle); return box;
 }
 
-function latestTimestamp(...values) {
-  const times = values.filter(Boolean).map((value) => Date.parse(value)).filter(Number.isFinite);
-  return times.length ? new Date(Math.max(...times)).toISOString() : undefined;
-}
-
-function roleState(run, agent, role) {
-  const active = activeRole(run, role);
-  const episode = agent?.episode;
-  const interrupted = active && ["failed", "cancelled", "stale"].includes(episode?.state);
-  const start = active ? agent?.turn_started_at || run.phase_started_at : undefined;
-  const lastMessage = agent?.last_message_at;
-  const reference = latestTimestamp(lastMessage, agent?.last_episode_change_at, start);
-  const idleMs = reference ? Date.now() - Date.parse(reference) : 0;
-  const stalled = active && !interrupted && Number.isFinite(idleMs) && idleMs >= 5 * 60_000;
-  let status = "尚未开始";
-  if (interrupted) status = "本轮已中断";
-  else if (stalled) status = `${Math.floor(idleMs / 60_000)} 分钟无新活动`;
-  else if (active && episode?.state === "running") status = "正在运行";
-  else if (active && episode?.state === "waiting") status = "正在等待";
-  else if (active && episode?.state === "completed") status = "会话已结束，等待核对";
-  else if (active) status = "已经派发，等待响应";
-  else if (agent?.last_turn_ended_at) status = "上一轮已交接";
-  const timing = active && start
-    ? { label: "本轮", start }
-    : agent?.last_turn_duration_ms !== undefined
-      ? { label: "上一轮", value: formatDurationMs(agent.last_turn_duration_ms) }
-      : { label: "尚无耗时", value: "—" };
-  const message = lastMessage ? `最近消息 ${age(lastMessage)}` : active ? "本轮尚无回复" : "没有最近消息记录";
-  return { active, interrupted, stalled, status, timing, message };
-}
-
-function renderRoleNode(run, role, title, count) {
-  const agent = role === "reviewer" ? run.monday : run.developer;
-  const info = roleState(run, agent, role);
-  const node = create("div", `cycle-node ${role}${info.active ? " current" : ""}${info.stalled ? " stalled" : ""}${info.interrupted ? " interrupted" : ""}`);
-  const heading = create("div", "cycle-node-head");
-  heading.append(create("b", "", title), create("span", "", count > 0 ? `第 ${count} 次` : "尚未开始"));
-  const time = create("strong", "role-duration", info.timing.value || durationText(info.timing.start));
-  if (info.timing.start) {
-    time.classList.add("live-duration");
-    time.dataset.start = info.timing.start;
-    time.dataset.prefix = `${info.timing.label} `;
-    time.textContent = `${info.timing.label} ${durationText(info.timing.start)}`;
-  } else {
-    time.textContent = `${info.timing.label} ${info.timing.value}`;
+function normalizeEvent(run, event) {
+  let actor = event.actor;
+  if (actor === "monday") actor = "reviewer";
+  if (actor === "github") actor = "ci";
+  if (event.type === "message_dispatched" && /monday/i.test(event.data?.action || "")) actor = "reviewer";
+  if (event.type === "message_dispatched" && /developer/i.test(event.data?.action || "")) actor = "developer";
+  if (!actor || actor === "none" || actor === "controller") {
+    if (event.type === "ci_observed" || event.type === "github_delivery" || event.type === "head_changed" || event.type === "review_observed") actor = event.type === "review_observed" ? "reviewer" : "ci";
+    else if (event.phase === "developer_implementing") actor = "developer";
+    else if (event.phase === "monday_finding" || event.phase === "monday_review") actor = "reviewer";
+    else actor = "controller";
   }
-  node.append(heading, create("span", "role-status", info.status), time, create("small", "", info.message));
-  return node;
+  const names = { reviewer: ["Reviewer", "REV"], developer: ["Developer", "DEV"], ci: ["自动检查", "CI"], controller: ["Controller", "CTL"] };
+  const [name, icon] = names[actor] || names.controller;
+  const cycle = event.data?.review_cycle || run.review_cycles?.find((item) => item.requested_at <= event.at && (!item.completed_at || item.completed_at >= event.at))?.cycle || 1;
+  return { name, icon, cycle, title: eventNames[event.type] || "状态已更新", message: event.message || run.waiting_for, at: event.at, type: event.type, data: event.data || {} };
 }
-
-function renderLoopPanel(run) {
-  const panel = create("div", "loop-panel");
-  const round = (run.iteration ?? 0) + 1;
-  const reviewCount = run.review_cycle?.cycle || run.review_cycles?.length || 0;
-  const badge = create("div", "loop-badge", `第 ${round} 轮${reviewCount ? ` · 第 ${reviewCount} 次复核` : " · 尚未复核"}`);
-  const track = create("div", "cycle-track");
-  track.append(renderRoleNode(run, "reviewer", "审查者", run.monday_attempt));
-  track.append(create("span", "forward-arrow", "→"));
-  track.append(renderRoleNode(run, "developer", "开发者", run.developer_attempt));
-  track.append(create("span", "forward-arrow", "→"));
-  const ciCurrent = effectivePhase(run) === "waiting_ci";
-  const ci = create("div", `ci-node${ciCurrent ? " current" : ""}`);
-  const ciTime = ciCurrent ? durationText(run.phase_started_at) : "";
-  ci.append(create("b", "", "CI"), create("span", "", ciLabels[run.ci?.state] || "尚未开始"), create("small", "", ciCurrent ? `本轮 ${ciTime}` : run.ci?.observed_at ? `更新于 ${age(run.ci.observed_at)}` : "等待提交"));
-  track.append(ci);
-  const back = create("div", "cycle-return");
-  back.append(create("i", "", "↖"), create("span", "", "新提交返回审查者，进入下一次复核"));
-  track.append(back);
-  panel.append(badge, track);
-  return panel;
+function syntheticLatest(run) {
+  const info = actorInfo(run);
+  return { name: info.name, icon: info.icon, cycle: Math.max(1, (run.iteration || 0) + 1), title: phaseNames[run.phase] || "处理中", message: run.waiting_for || "正在核对最新状态", at: run.last_activity_at || run.updated_at, type: "current" };
 }
-
-function episodeText(agent) {
-  const episode = agent?.episode;
-  if (!episode) return "尚未开始";
-  return `${episodeLabels[episode.state] || "状态未知"} · ${age(agent.episode_observed_at)}`;
+function humanMessage(value) {
+  return String(value || "正在核对最新状态")
+    .replace(/an available Controller execution slot/i, "等待 Controller 调度")
+    .replace(/a validated Finding ZIP/i, "等待经过验证的 Finding ZIP")
+    .replace(/an open pull request/i, "等待 Developer 创建 Pull Request")
+    .replace(/a new Head SHA on the existing PR/i, "等待 Developer 推送新的提交")
+    .replace(/current-SHA approval or comment plus new Finding ZIP/i, "等待当前提交的批准，或审核意见与新 Finding ZIP")
+    .replace(/operator resume/i, "等待用户恢复任务")
+    .replace(/operator intervention/i, "等待用户处理")
+    .replace(/manual reconciliation/i, "正在重新核对已有交付");
 }
-
-function appendFact(list, label, value) {
-  const item = create("div");
-  item.append(create("dt", "", label), create("dd", "", value || "—"));
-  list.append(item);
-}
-
-function renderMarkdown(container, markdown) {
-  container.replaceChildren();
-  const lines = String(markdown || "").replace(/\r/g, "").split("\n");
-  let list = null;
-  let code = null;
-  const flushList = () => { list = null; };
-  for (const raw of lines) {
-    if (raw.startsWith("```")) {
-      flushList();
-      if (code) code = null;
-      else { code = create("pre"); container.append(code); }
-      continue;
-    }
-    if (code) {
-      code.textContent += `${raw}\n`;
-      continue;
-    }
-    if (!raw.trim()) { flushList(); continue; }
-    const heading = raw.match(/^(#{1,3})\s+(.+)$/);
-    if (heading) {
-      flushList();
-      container.append(create(`h${heading[1].length}`, "", heading[2]));
-      continue;
-    }
-    const bullet = raw.match(/^\s*[-*+]\s+(.+)$/);
-    if (bullet) {
-      if (!list) { list = create("ul"); container.append(list); }
-      list.append(create("li", "", bullet[1]));
-      continue;
-    }
-    flushList();
-    container.append(create("p", "", raw));
-  }
-  if (!container.childNodes.length) container.append(create("p", "", "发现报告中没有可显示的正文。"));
-}
-
-function eventDescription(event) {
-  switch (event.type) {
-    case "phase_changed": return `任务已进入“${phaseLabels[event.phase] || "下一"}”阶段。`;
-    case "agent_activity": return "检测到受控会话出现了新的智能体活动。";
-    case "finding_validated": return "新的发现报告 ZIP 已通过格式与完整性校验。";
-    case "github_delivery": return "已核对到开发者提交的 PR 与当前提交。";
-    case "ci_observed": return "已核对当前 PR 提交对应的 CI 结果。";
-    case "review_cycle_started": return "当前 PR 提交已经绑定到新的复核轮次。";
-    case "review_observed": return "已发现配置审查账号留下的 GitHub 审核证据。";
-    case "controller_restarted": return "调度器重启后会先核对既有交付，再决定是否续发。";
-    case "head_changed": return "PR 出现新提交，上一提交的批准与 CI 不再有效。";
-    default: return "调度器记录了一次可追溯的状态变化。";
+function eventMessage(run, item, latest) {
+  if (latest) return `${humanMessage(item.message)} · ${age(item.at)}`;
+  switch (item.type) {
+    case "message_dispatched": return `已向 ${item.name} 的原会话发送本阶段要求`;
+    case "agent_activity": return `${item.name} 会话出现了新消息或 Episode 状态变化`;
+    case "finding_validated": return `Finding ZIP v${item.data?.version || ""} 已完成下载、校验和保存`;
+    case "github_delivery": return `已机械核对 PR #${item.data?.pr || run.pr?.number || "—"} 与当前提交`;
+    case "ci_observed": return `当前提交的 CI 状态：${item.data?.state === "success" ? "通过" : item.data?.state === "failure" ? "失败" : "运行中"}`;
+    case "review_cycle_started": return `本轮复核绑定 Head ${short(item.data?.head_sha, 10)}`;
+    case "review_observed": return "已核对到 Reviewer 的 GitHub 审核证据";
+    case "head_changed": return `检测到新提交 ${short(item.data?.sha, 10)}，旧 CI 与批准已失效`;
+    case "phase_changed": return `任务进入“${phaseNames[item.data?.to] || phaseNames[run.phase] || "下一阶段"}”`;
+    default: return humanMessage(item.message);
   }
 }
-
-function renderAgents(run) {
-  const list = create("div", "agent-statuses");
-  for (const [name, initial, agent] of [["审查者", "审", run.monday], ["开发者", "开", run.developer]]) {
-    const line = create("div", "agent-line");
-    const copy = create("div");
-    copy.append(create("b", "", name), create("small", "", agent?.topic_id ? `会话 ${agent.topic_id}` : "会话尚未创建"));
-    line.append(create("span", "agent-icon", initial), copy, create("span", "", episodeText(agent)));
-    list.append(line);
+function eventCard(run, item, latest = false) {
+  const card = node("article", `event${latest ? " latest" : ""}`);
+  if (latest) card.append(node("span", "latest-label", "最新"));
+  const actor = node("div", "actor");
+  actor.append(node("i", "", item.icon), node("span", "", item.name), node("small", "", `第 ${item.cycle} 轮`));
+  const main = node("div", "event-main");
+  main.append(node("b", "", item.title), node("span", "", eventMessage(run, item, latest)));
+  const status = node("span", "event-status", latest && !terminal.has(run.phase) && run.phase !== "paused" ? "处理中" : "已完成");
+  const timing = node("div", "timing");
+  timing.append(node("span", "", `开始 ${clock(item.at)}`));
+  if (latest && !terminal.has(run.phase) && run.phase !== "paused") timing.append(node("span", "live", `已运行 ${elapsed(run.phase_started_at || item.at)}`));
+  else timing.append(node("span", "", `用时 ${elapsed(item.at, item.data?.ended_at || item.at)}`));
+  const finding = item.type === "finding_validated" ? run.finding_history?.find((entry) => entry.version === item.data?.version || entry.validated_at === item.at) : undefined;
+  if (finding && !latest) {
+    const link = node("a", "zip-link", `finding-v${finding.version}.zip ↓`);
+    link.href = `${state.apiUrl}/api/runs/${run.run_id}/findings/${finding.version}/download`;
+    link.addEventListener("click", (event) => { event.preventDefault(); downloadFinding(run, finding); });
+    main.append(link);
   }
-  return list;
+  card.append(actor, main, status, timing); return card;
+}
+function activityPanel(run) {
+  const wrap = node("div", "activity-wrap");
+  const panel = node("div", "activity");
+  const history = node("div", "history");
+  const inner = node("div", "history-inner");
+  const normalized = (state.events.get(run.run_id) || []).map((event) => normalizeEvent(run, event));
+  const visible = normalized.filter((item) => ["message_dispatched","agent_activity","finding_validated","github_delivery","ci_observed","review_cycle_started","review_observed","head_changed","phase_changed"].includes(item.type));
+  visible.forEach((item, index) => { item.data.ended_at ||= visible[index + 1]?.at || (terminal.has(run.phase) ? run.updated_at : undefined); });
+  const latest = terminal.has(run.phase) ? (visible.at(-1) || syntheticLatest(run)) : syntheticLatest(run);
+  visible.slice(0, terminal.has(run.phase) ? -1 : undefined).forEach((item) => inner.append(eventCard(run, item)));
+  if (!inner.childNodes.length) inner.append(eventCard(run, normalizeEvent(run, { type: "run_created", actor: "controller", phase: "queued", at: run.created_at, message: "Controller 已接管任务。", data: {} })));
+  history.append(inner); panel.append(history, eventCard(run, latest, true)); wrap.append(panel);
+  requestAnimationFrame(() => { history.scrollTop = history.scrollHeight; });
+  return wrap;
 }
 
-function renderCycles(run) {
-  const list = create("div", "cycle-list");
-  const cycles = [...(run.review_cycles || [])].sort((a, b) => b.cycle - a.cycle);
-  if (!cycles.length) {
-    list.append(create("p", "", "CI 通过后，这里会记录每次复核及其绑定的提交。"));
-    return list;
-  }
-  for (const cycle of cycles) {
-    const row = create("div", "cycle-line");
-    const copy = create("div");
-    copy.append(create("b", "", `提交 ${short(cycle.head_sha, 10)}`), create("small", "", cycle.finding ? `发现报告 v${cycle.finding.version}` : "本轮没有发现报告 ZIP"));
-    const ending = create("span", "cycle-ending", cycleLabels[cycle.status] || cycle.status);
-    if (cycle.finding) {
-      const download = create("button", "inline-download", "下载 ZIP");
-      download.type = "button";
-      download.addEventListener("click", (event) => { event.stopPropagation(); downloadFinding(run, cycle.finding); });
-      ending.append(download);
-    }
-    row.append(create("b", "", `第 ${cycle.cycle} 次`), copy, ending);
-    list.append(row);
-  }
-  return list;
-}
-
-function renderEvents(run) {
-  const list = create("div", "event-list");
-  const events = [...(state.events.get(run.run_id) || [])].reverse().slice(0, 8);
-  if (!events.length) {
-    list.append(create("p", "", "尚无阶段事件。"));
-    return list;
-  }
-  for (const event of events) {
-    const row = create("div", "event-line");
-    const copy = create("div");
-    copy.append(create("b", "", eventLabels[event.type] || "状态已更新"), create("small", "", eventDescription(event)));
-    row.append(create("time", "", clock(event.at)), copy);
-    list.append(row);
-  }
-  return list;
-}
-
-function renderDetail(run) {
-  const detail = create("div", "task-detail");
-  const toolbar = create("div", "detail-toolbar");
-  const links = create("div", "detail-links");
-  if (run.pr?.url) {
-    const pr = create("a", "detail-link", `打开 PR #${run.pr.number} ↗`);
-    pr.href = run.pr.url;
-    pr.target = "_blank";
-    pr.rel = "noopener noreferrer";
-    links.append(pr);
-  }
-  if (run.latest_finding) {
-    const zip = create("button", "detail-link", `下载发现报告 v${run.latest_finding.version}（ZIP）`);
-    zip.type = "button";
-    zip.addEventListener("click", () => downloadFinding(run, run.latest_finding));
-    links.append(zip);
-  }
-  const actions = create("div", "detail-actions");
-  const reconcile = create("button", "secondary-button", "立即核对");
-  reconcile.type = "button";
-  reconcile.addEventListener("click", () => runAction(run, "reconcile"));
-  actions.append(reconcile);
-  if (["blocked", "blocked_auth", "blocked_github_auth"].includes(run.phase)) {
-    const resume = create("button", "secondary-button", "恢复任务");
-    resume.type = "button";
-    resume.addEventListener("click", () => runAction(run, "resume"));
-    actions.append(resume);
-  }
-  if (!terminalPhases.has(run.phase)) {
-    const cancel = create("button", "danger-button", "取消任务");
-    cancel.type = "button";
-    cancel.addEventListener("click", () => runAction(run, "cancel"));
-    actions.append(cancel);
-  }
-  toolbar.append(links, actions);
-
-  const grid = create("div", "detail-grid");
-  const primary = create("div", "detail-primary");
-  primary.append(create("p", "section-label", "完整实现要求"), create("p", "request-copy", run.request));
-  const findingHead = create("div", "finding-head");
-  findingHead.append(create("p", "section-label", "报告正文（FINDING.md）"), create("small", "", run.latest_finding ? `版本 ${run.latest_finding.version} · ${Math.ceil(run.latest_finding.size / 1024)} KB` : "尚未收到 ZIP"));
-  primary.append(findingHead);
-  const markdown = create("div", "markdown-view markdown-placeholder");
-  const cached = run.latest_finding ? state.findings.get(`${run.run_id}:${run.latest_finding.version}`) : null;
-  if (cached?.markdown) {
-    markdown.classList.remove("markdown-placeholder");
-    renderMarkdown(markdown, cached.markdown);
-  } else if (cached?.error) {
-    markdown.textContent = `暂时无法读取报告正文：${cached.error}`;
-  } else {
-    markdown.textContent = run.latest_finding ? "正在读取 FINDING.md…" : "审查者交付发现报告 ZIP 后，这里会显示其中的 FINDING.md。";
-  }
-  primary.append(markdown);
-
-  const side = create("aside", "detail-side");
-  side.append(create("p", "section-label", "任务信息"));
-  const facts = create("dl", "facts");
-  appendFact(facts, "任务编号", run.run_id);
-  appendFact(facts, "当前分支", run.branch);
-  appendFact(facts, "当前提交", short(run.pr?.head_sha, 14));
-  appendFact(facts, "CI 状态", ciLabels[run.ci?.state] || "尚未开始");
-  side.append(facts, create("p", "section-label", "会话状态"), renderAgents(run));
-  const cycles = create("section", "cycle-section");
-  cycles.append(create("p", "section-label", "复核记录"), renderCycles(run));
-  side.append(cycles);
-  const events = create("section", "event-section");
-  events.append(create("p", "section-label", "最近进展"), renderEvents(run));
-  side.append(events);
-  grid.append(primary, side);
-  detail.append(toolbar, grid);
-  return detail;
-}
-
-function renderTask(run, index) {
-  const card = create("article", `task-card${terminalPhases.has(run.phase) ? " terminal" : ""}${state.expanded.has(run.run_id) ? " open" : ""}`);
-  card.dataset.phase = run.phase;
-  const summary = create("button", "task-summary");
-  summary.type = "button";
-  summary.setAttribute("aria-expanded", String(state.expanded.has(run.run_id)));
-  const number = create("span", "task-number", String(index + 1).padStart(2, "0"));
-  const main = create("div", "task-main");
-  const cycle = run.review_cycle?.cycle || run.review_cycles?.length || 0;
-  const round = (run.iteration ?? 0) + 1;
-  main.append(create("h2", "", taskTitle(run.request)));
-  const meta = create("p");
-  meta.append(create("b", "", run.repo), create("span", "", "·"), document.createTextNode(`第 ${round} 轮${cycle ? ` · 第 ${cycle} 次复核` : " · 尚未复核"}`));
-  main.append(meta);
-  const status = create("div", "task-state");
-  const end = terminalPhases.has(run.phase) ? run.updated_at : "";
-  const timer = create("time", "task-timer live-duration", durationText(run.created_at, end));
-  timer.dataset.start = run.created_at;
-  if (end) timer.dataset.end = end;
-  timer.dataset.prefix = "总计 ";
-  timer.textContent = `总计 ${durationText(run.created_at, end)}`;
-  status.append(create("strong", "", actorStatus(run)), create("span", "", terminalPhases.has(run.phase) ? "处理结束" : `最近活动 ${age(run.last_activity_at)}`), timer);
-  summary.append(number, main, renderLoopPanel(run), status, create("span", "task-chevron", "⌄"));
-  summary.addEventListener("click", async () => {
-    if (state.expanded.has(run.run_id)) state.expanded.delete(run.run_id);
-    else state.expanded.add(run.run_id);
-    renderRuns();
-    if (state.expanded.has(run.run_id)) {
-      await Promise.all([loadEvents(run.run_id), loadFinding(run)]);
-      renderRuns();
-    }
-  });
-  card.append(summary);
-  if (state.expanded.has(run.run_id)) card.append(renderDetail(run));
-  return card;
-}
-
-function renderRuns() {
-  const active = state.runs.filter((run) => activePhases.has(run.phase)).length;
-  const done = state.runs.filter((run) => terminalPhases.has(run.phase)).length;
-  setText("activeCount", active, "0");
-  setText("doneCount", done, "0");
-  setText("runCount", `${state.runs.length} 个任务`, "0 个任务");
-  const list = $("runList");
-  list.replaceChildren();
-  const runs = state.runs.filter(runMatchesFilter);
-  if (!runs.length) {
-    const empty = create("div", "empty-state");
-    empty.append(create("span", "", "01"), create("h2", "", state.connected ? "这个筛选下没有任务" : "连接后查看任务"), create("p", "", state.connected ? "切换筛选条件，或者明确创建一个新的自迭代任务。" : "请先连接任务调度器。"));
-    const start = create("button", "primary-button", state.connected ? "新建任务" : "连接设置");
-    start.type = "button";
-    start.addEventListener("click", state.connected ? openNewRun : openConnection);
-    empty.append(start);
-    list.append(empty);
-    return;
-  }
-  runs.forEach((run, index) => list.append(renderTask(run, index)));
-}
-
-async function loadEvents(runId) {
-  const after = state.eventCursors.get(runId) || 0;
-  try {
-    const body = await request(`/api/runs/${runId}/events?after=${after}`);
-    const current = state.events.get(runId) || [];
-    const seen = new Set(current.map((event) => event.seq));
-    const incoming = (body.events || []).filter((event) => !seen.has(event.seq));
-    const combined = [...current, ...incoming].sort((a, b) => a.seq - b.seq);
-    state.events.set(runId, combined);
-    state.eventCursors.set(runId, combined.at(-1)?.seq || after);
-  } catch (error) {
-    if (error.status !== 404) throw error;
-  }
-}
-
-async function loadFinding(run) {
+function taskDetail(run) {
+  const detail = node("section", "detail");
+  const main = node("div"); main.append(node("h3", "", "完整任务要求"), node("p", "request-copy", run.request));
   const finding = run.latest_finding;
-  if (!finding) return;
-  const key = `${run.run_id}:${finding.version}`;
-  if (state.findings.has(key)) return;
-  try {
-    state.findings.set(key, await request(`/api/runs/${run.run_id}/findings/${finding.version}`));
-  } catch (error) {
-    state.findings.set(key, { error: error.message });
+  if (finding) {
+    main.append(node("h3", "", `最新 Finding · v${finding.version}`));
+    main.lastChild.style.marginTop = "16px";
+    const loaded = state.findings.get(`${run.run_id}:${finding.version}`);
+    main.append(node("div", "finding-copy", loaded?.markdown || (loaded?.error ? `暂时无法读取：${loaded.error}` : "正在读取 FINDING.md…")));
   }
+  const aside = node("aside"); aside.append(node("h3", "", "机械状态"));
+  const facts = node("dl", "facts");
+  [["Run",run.run_id],["仓库",run.repo],["基础分支",run.base_branch],["工作分支",run.branch],["Head",short(run.pr?.head_sha,14)],["等待",run.waiting_for]].forEach(([key,value]) => { const row=node("div"); row.append(node("dt","",key),node("dd","",value || "—")); facts.append(row); });
+  aside.append(facts); detail.append(main, aside); return detail;
 }
-
-async function downloadFinding(run, finding) {
-  try {
-    const response = await request(`/api/runs/${run.run_id}/findings/${finding.version}/download`, {}, false);
-    const url = URL.createObjectURL(await response.blob());
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `finding-v${finding.version}.zip`;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1_000);
-  } catch (error) {
-    handleError(error);
-  }
+function taskCard(run) {
+  const card = node("article", `task${terminal.has(run.phase) ? " terminal" : ""}${state.expanded.has(run.run_id) ? " open" : ""}`);
+  const head = node("header", "task-head");
+  const left = node("div"); left.append(node("div", "state", `${actorInfo(run).name} · ${phaseNames[run.phase] || "处理中"}`), node("h2", "", title(run.request)));
+  const meta = node("div", "task-meta"); meta.append(node("span", "", run.repo));
+  if (run.pr?.url) { const link=node("a","pr-link",`PR #${run.pr.number} · ${short(run.pr.head_sha)} ↗`); link.href=run.pr.url; link.target="_blank"; link.rel="noopener noreferrer"; meta.append(link); }
+  left.append(meta);
+  const end = terminal.has(run.phase) ? run.updated_at : "";
+  const total = node("div", "total"); total.append(node("span", "", end ? "任务总用时" : "已运行"), node("strong", "live-total", elapsed(run.created_at,end))); total.lastChild.dataset.start=run.created_at; total.lastChild.dataset.end=end;
+  head.append(left,total);
+  const body=node("div","task-body"); body.append(cycleGraphic(run),activityPanel(run));
+  const actions=node("div","task-actions");
+  const toggle=node("button","detail-toggle",state.expanded.has(run.run_id)?"收起任务详情 ↑":"查看任务要求与证据 ↓"); toggle.type="button";
+  toggle.addEventListener("click",async()=>{ if(state.expanded.has(run.run_id))state.expanded.delete(run.run_id);else state.expanded.add(run.run_id); render(); if(state.expanded.has(run.run_id)){await loadFinding(run);render();} });
+  const group=node("div","action-group");
+  if(run.phase === "paused" || ["blocked","blocked_auth","blocked_github_auth"].includes(run.phase)){const resume=node("button","","恢复");resume.onclick=()=>runAction(run,"resume");group.append(resume);}
+  else if(!terminal.has(run.phase)){const pause=node("button","","暂停");pause.onclick=()=>runAction(run,"pause");group.append(pause);}
+  if(!terminal.has(run.phase)){const reconcile=node("button","","立即核对");reconcile.onclick=()=>runAction(run,"reconcile");const cancel=node("button","danger","取消");cancel.onclick=()=>runAction(run,"cancel");group.append(reconcile,cancel);}
+  actions.append(toggle,group); card.append(head,body,actions); if(state.expanded.has(run.run_id))card.append(taskDetail(run)); return card;
 }
-
-async function refresh({ silent = false } = {}) {
-  if (state.refreshing || !state.token) return;
-  state.refreshing = true;
-  try {
-    const body = await request("/api/runs");
-    state.runs = body.runs || [];
-    setConnection(true, "已连接");
-    setText("lastSync", `更新于 ${clock(new Date().toISOString())}`);
-    for (const runId of state.expanded) await loadEvents(runId);
-    renderRuns();
-    if (!silent) toast("任务状态已刷新");
-  } catch (error) {
-    handleError(error, silent);
-  } finally {
-    state.refreshing = false;
-  }
+function matches(run){if(state.filter==="active")return active.has(run.phase);if(state.filter==="done")return terminal.has(run.phase);return true;}
+function render(){
+  $("runCount").textContent=state.runs.length; $("activeCount").textContent=state.runs.filter(r=>active.has(r.phase)).length; $("doneCount").textContent=state.runs.filter(r=>terminal.has(r.phase)).length;
+  const list=$("runList");list.replaceChildren();const runs=state.runs.filter(matches);
+  if(!runs.length){const empty=node("div","empty");empty.append(node("span","","00"),node("h2","",state.connected?"目前没有符合条件的任务":"连接后查看自迭代任务"),node("p","",state.connected?"在与 Saturday 的会话中明确要求启动自迭代，任务会出现在这里。":"Artifact 只展示和管理任务，不负责创建任务。"));list.append(empty);return;}
+  runs.forEach(run=>list.append(taskCard(run)));
 }
+async function loadEvents(run){try{const body=await api(`/api/runs/${run.run_id}/events?after=0`);state.events.set(run.run_id,body.events||[]);}catch{state.events.set(run.run_id,[]);}}
+async function loadFinding(run){const finding=run.latest_finding;if(!finding)return;const key=`${run.run_id}:${finding.version}`;if(state.findings.has(key))return;try{state.findings.set(key,await api(`/api/runs/${run.run_id}/findings/${finding.version}`));}catch(error){state.findings.set(key,{error:error.message});}}
+async function downloadFinding(run,finding){try{const response=await api(`/api/runs/${run.run_id}/findings/${finding.version}/download`,{},true);const url=URL.createObjectURL(await response.blob());const a=node("a");a.href=url;a.download=`finding-v${finding.version}.zip`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(error){toast(error.message);}}
+async function refresh(silent=false){if(state.refreshing||!state.token||!state.apiUrl)return;state.refreshing=true;try{const body=await api("/api/runs");state.runs=body.runs||[];await Promise.all(state.runs.map(loadEvents));setConnection(true,"已连接");$("lastSync").textContent=`更新于 ${clock(new Date().toISOString())}`;render();if(!silent)toast("状态已刷新");}catch(error){setConnection(false,"连接失败");if(!silent)toast(error.message);}finally{state.refreshing=false;}}
+async function runAction(run,action){if(action==="cancel"&&!confirm("确认取消这个任务？已有会话、PR 和历史文件都会保留。"))return;try{const updated=await api(`/api/runs/${run.run_id}/${action}`,{method:"POST"});const index=state.runs.findIndex(item=>item.run_id===run.run_id);if(index>=0)state.runs[index]=updated;await loadEvents(updated);render();toast(action==="pause"?"任务已软暂停":action==="resume"?"任务已恢复":action==="cancel"?"任务已取消":"核对完成");}catch(error){toast(error.message);}}
 
-async function runAction(run, action) {
-  if (action === "cancel" && !window.confirm("确认取消这个任务？会话、PR 和历史状态都会保留。")) return;
-  try {
-    const updated = await request(`/api/runs/${run.run_id}/${action}`, { method: "POST" });
-    const index = state.runs.findIndex((item) => item.run_id === run.run_id);
-    if (index >= 0) state.runs[index] = updated;
-    await loadEvents(run.run_id);
-    renderRuns();
-    toast(action === "reconcile" ? "已完成机械核对" : action === "resume" ? "任务已恢复" : "任务已取消");
-  } catch (error) {
-    handleError(error);
-  }
-}
-
-function openConnection() {
-  $("apiUrl").value = state.apiUrl;
-  $("operatorToken").value = state.token;
-  $("connectionDialog").showModal();
-}
-
-function openNewRun() {
-  if (!state.token || !state.connected) {
-    openConnection();
-    toast("请先连接任务调度器", "error");
-    return;
-  }
-  $("newRunDialog").showModal();
-  $("requestInput").focus();
-}
-
-$("connectionButton").addEventListener("click", openConnection);
-$("newRunButton").addEventListener("click", openNewRun);
-$("emptyStartButton").addEventListener("click", openNewRun);
-$("refreshButton").addEventListener("click", () => refresh());
-
-document.querySelectorAll("[data-close]").forEach((button) => {
-  button.addEventListener("click", () => button.closest("dialog").close());
-});
-
-document.querySelectorAll("[data-filter]").forEach((button) => {
-  button.addEventListener("click", () => {
-    state.filter = button.dataset.filter;
-    document.querySelectorAll("[data-filter]").forEach((item) => item.classList.toggle("active", item === button));
-    renderRuns();
-  });
-});
-
-$("connectionForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  state.apiUrl = $("apiUrl").value.trim().replace(/\/$/, "");
-  state.token = $("operatorToken").value;
-  try {
-    const body = await request("/api/runs");
-    sessionStorage.setItem("catsloop.apiUrl", state.apiUrl);
-    sessionStorage.setItem("catsloop.operatorToken", state.token);
-    state.runs = body.runs || [];
-    setConnection(true, "已连接");
-    $("connectionDialog").close();
-    setText("lastSync", `更新于 ${clock(new Date().toISOString())}`);
-    renderRuns();
-    toast("任务调度器已连接");
-  } catch (error) {
-    handleError(error);
-  }
-});
-
-$("newRunForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const submit = event.submitter;
-  if (submit) submit.disabled = true;
-  try {
-    const run = await request("/api/runs", {
-      method: "POST",
-      body: JSON.stringify({
-        request: $("requestInput").value.trim(),
-        repo: $("repoInput").value.trim(),
-        base_branch: $("baseBranchInput").value.trim(),
-        monday_agent_uid: Number($("mondayUidInput").value),
-        developer_agent_uid: Number($("developerUidInput").value),
-      }),
-    });
-    $("newRunDialog").close();
-    $("newRunForm").reset();
-    $("baseBranchInput").value = "main";
-    $("mondayUidInput").value = "553";
-    $("developerUidInput").value = "365";
-    state.runs.unshift(run);
-    state.expanded.add(run.run_id);
-    renderRuns();
-    toast("任务已创建并进入队列");
-  } catch (error) {
-    handleError(error);
-  } finally {
-    if (submit) submit.disabled = false;
-  }
-});
-
-setInterval(() => {
-  document.querySelectorAll(".live-duration").forEach((node) => {
-    node.textContent = `${node.dataset.prefix || ""}${durationText(node.dataset.start, node.dataset.end || "")}`;
-  });
-}, 1_000);
-setInterval(() => refresh({ silent: true }), 5_000);
-
-if (state.token) refresh({ silent: true });
-else {
-  setConnection(false, "未连接");
-  renderRuns();
-}
+$("connectionButton").onclick=()=>{$("apiUrl").value=state.apiUrl;$("operatorToken").value=state.token;$("connectionDialog").showModal();};
+$("refreshButton").onclick=()=>refresh();
+document.querySelectorAll("[data-close]").forEach(button=>button.onclick=()=>button.closest("dialog").close());
+document.querySelectorAll("[data-filter]").forEach(button=>button.onclick=()=>{state.filter=button.dataset.filter;document.querySelectorAll("[data-filter]").forEach(item=>item.classList.toggle("active",item===button));render();});
+$("connectionForm").onsubmit=async(event)=>{event.preventDefault();state.apiUrl=$("apiUrl").value.trim().replace(/\/$/,"");state.token=$("operatorToken").value;sessionStorage.setItem("catsloop.apiUrl",state.apiUrl);sessionStorage.setItem("catsloop.operatorToken",state.token);$("connectionDialog").close();await refresh();};
+setInterval(()=>{document.querySelectorAll(".live-total").forEach(item=>item.textContent=elapsed(item.dataset.start,item.dataset.end));document.querySelectorAll(".timing .live").forEach(()=>{});},1000);
+setInterval(()=>refresh(true),5000);
+if(state.token&&state.apiUrl)refresh(true);else{setConnection(false,"未连接");render();}

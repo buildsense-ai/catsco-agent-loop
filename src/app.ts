@@ -7,6 +7,7 @@ import type { LoopController } from "./controller.js";
 import { readFindingMarkdown } from "./finding-reader.js";
 import type { RunStore } from "./store.js";
 import type { CreateRunInput } from "./types.js";
+import { LoopError } from "./errors.js";
 
 const MAX_BODY = 1024 * 1024;
 
@@ -53,7 +54,7 @@ export function createLoopApi(controller: LoopController, store: RunStore) {
       if (origin && controller.config.allowedOrigin && origin === controller.config.allowedOrigin) {
         response.setHeader("access-control-allow-origin", origin);
         response.setHeader("vary", "Origin");
-        response.setHeader("access-control-allow-headers", "authorization,content-type");
+        response.setHeader("access-control-allow-headers", "authorization,content-type,idempotency-key");
         response.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
       }
       if (request.method === "OPTIONS") {
@@ -69,7 +70,9 @@ export function createLoopApi(controller: LoopController, store: RunStore) {
 
       if (request.method === "POST" && url.pathname === "/api/runs") {
         const body = await jsonBody(request) as CreateRunInput;
-        send(response, 201, await controller.createRun(body));
+        const key = request.headers["idempotency-key"];
+        if (Array.isArray(key)) throw new HttpError(400, "multiple idempotency keys are not allowed");
+        send(response, 201, await controller.createRun({ ...body, ...(key ? { idempotency_key: key } : {}) }));
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/runs") {
@@ -98,7 +101,7 @@ export function createLoopApi(controller: LoopController, store: RunStore) {
         send(response, 200, { finding, markdown: await readFindingMarkdown(path) });
         return;
       }
-      const match = url.pathname.match(/^\/api\/runs\/(run_[A-Za-z0-9_-]+)(?:\/(events|resume|reconcile|cancel))?$/);
+      const match = url.pathname.match(/^\/api\/runs\/(run_[A-Za-z0-9_-]+)(?:\/(events|pause|resume|reconcile|cancel))?$/);
       if (!match) throw new HttpError(404, "not found");
       const runId = match[1]!;
       const action = match[2];
@@ -109,6 +112,10 @@ export function createLoopApi(controller: LoopController, store: RunStore) {
       if (request.method === "GET" && action === "events") {
         const after = Number(url.searchParams.get("after") ?? 0);
         send(response, 200, { events: await store.readEvents(runId, Number.isFinite(after) ? after : 0) });
+        return;
+      }
+      if (request.method === "POST" && action === "pause") {
+        send(response, 200, await controller.pause(runId));
         return;
       }
       if (request.method === "POST" && action === "resume") {
@@ -125,7 +132,7 @@ export function createLoopApi(controller: LoopController, store: RunStore) {
       }
       throw new HttpError(405, "method not allowed");
     } catch (error) {
-      const status = error instanceof HttpError ? error.status : (error as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 500;
+      const status = error instanceof HttpError ? error.status : error instanceof LoopError && error.status ? error.status : (error as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 500;
       send(response, status, { error: error instanceof Error ? error.message : String(error) });
     }
   });
