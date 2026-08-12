@@ -201,6 +201,7 @@ export class LoopController {
       if (!["paused", "blocked", "blocked_auth", "blocked_github_auth"].includes(run.phase)) return run;
       const blockedWithoutEpisodeStart = run.phase === "blocked" && /No mechanical progress/i.test(run.terminal_reason ?? "");
       const reviewerAuthBlocked = Boolean(run.monday.github_auth_error);
+      const developerProtocolBlocked = Boolean(run.developer.protocol_error);
       run.last_error = undefined;
       run.terminal_reason = undefined;
       run.paused_for_manual_message = undefined;
@@ -212,6 +213,24 @@ export class LoopController {
       run.last_activity_at = resumedAt;
       run.last_progress_at = resumedAt;
       const phase = run.resume_phase ?? this.inferResumePhase(run);
+      if (developerProtocolBlocked && phase === "developer_implementing" && run.developer.topic_id) {
+        // The operator may resume after the Controller's direct-task contract
+        // has been upgraded. Archive the stale refusal and explicitly wake the
+        // same Topic with the current contract; do not silently loop retries.
+        run.developer.protocol_error = undefined;
+        run.developer_attempt += 1;
+        await this.dispatch(run, run.developer, `developer-protocol-resume-${run.developer_attempt}-${run.iteration}`, {
+          topicId: run.developer.topic_id,
+          clientMsgId: "",
+          text: supplementPrompt(run, "Developer", run.pr
+            ? `a new Head SHA on existing PR #${run.pr.number}`
+            : `an open PR from ${run.branch} to ${run.base_branch}`),
+        });
+        return await this.transition(run, phase, this.actorFor(phase), run.pr
+          ? `a new Head SHA on existing PR #${run.pr.number}`
+          : `an open PR from ${run.branch} to ${run.base_branch}`,
+        "Operator explicitly retried the original Developer Topic with the current direct-task contract.");
+      }
       if (reviewerAuthBlocked && phase === "monday_review" && run.monday.topic_id) {
         run.monday.github_auth_error = undefined;
         // Preserve the failed attempt as a completed historical cycle, then

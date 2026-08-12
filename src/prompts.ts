@@ -69,7 +69,7 @@ export function mondayReviewPrompt(run: LoopRun): string {
 export function supplementPrompt(run: LoopRun, role: "Monday" | "Developer", missing: string): string {
   const identity = role === "Monday"
     ? `For GitHub review writes, the required login is ${run.monday_github_login}; do not use Developer login ${run.developer_github_login}. Verify or switch gh identity before writing. Do not substitute an issue comment. If unavailable, include exactly: LOOP_BLOCKED_GITHUB_AUTH reviewer=${run.monday_github_login}`
-    : `For implementation writes, use Developer login ${run.developer_github_login}.`;
+    : `For implementation writes, use Developer login ${run.developer_github_login}. This is a direct CatsCompany Agent Task; do not invoke the legacy loopctl-worker Skill or demand execute_attempt/workspaceLease/targetTopicId contracts.`;
   return [capsule(run, role, missing), "", identity, `The prior Episode ended, but Controller still cannot verify: ${missing}.`, "Do not redo completed work. Reconcile existing side effects and provide only the missing mechanical delivery."].join("\n");
 }
 
