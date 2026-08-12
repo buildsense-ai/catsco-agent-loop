@@ -18,7 +18,7 @@
       </div>
       <div class="head-actions">
         <span class="connection" id="connectionState" data-state="offline"><i></i><b id="healthText">未连接</b></span>
-        <button class="quiet-button" id="connectionButton" type="button">连接设置</button>
+        <button class="quiet-button" id="connectionButton" type="button">管理授权</button>
       </div>
     </header>
 
@@ -36,11 +36,10 @@
 
   <dialog id="connectionDialog">
     <form class="dialog-card" id="connectionForm">
-      <header><div><small>安全连接</small><h2>连接 Loop Controller</h2></div><button type="button" data-close aria-label="关闭">×</button></header>
-      <label>接口地址<input id="apiUrl" type="url" required placeholder="https://example.com:19993"></label>
+      <header><div><small>管理权限</small><h2>授权任务操作</h2></div><button type="button" data-close aria-label="关闭">×</button></header>
       <label>操作员令牌<input id="operatorToken" type="password" autocomplete="off" required></label>
-      <p>令牌只保留在当前浏览器标签页的 sessionStorage 中。</p>
-      <button class="primary-button" type="submit">验证并连接</button>
+      <p>查看任务、PR 和 ZIP 无需令牌。只有暂停、恢复、核对和取消会使用该令牌，并且它只保留在当前标签页。</p>
+      <button class="primary-button" type="submit">保存管理授权</button>
     </form>
   </dialog>
 

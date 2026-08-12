@@ -70,3 +70,16 @@ export function supplementPrompt(run: LoopRun, role: "Monday" | "Developer", mis
     : `For implementation writes, use Developer login ${run.developer_github_login}.`;
   return [capsule(run, role, missing), "", identity, `The prior Episode ended, but Controller still cannot verify: ${missing}.`, "Do not redo completed work. Reconcile existing side effects and provide only the missing mechanical delivery."].join("\n");
 }
+
+export function unstartedResumePrompt(run: LoopRun, role: "Monday" | "Developer", missing: string): string {
+  const identity = role === "Monday"
+    ? `For GitHub review writes, the required login is ${run.monday_github_login}; do not use Developer login ${run.developer_github_login}.`
+    : `For implementation writes, use Developer login ${run.developer_github_login}.`;
+  return [
+    capsule(run, role, missing),
+    "",
+    identity,
+    "Controller recorded the prior delivery, but never observed this Agent Episode start.",
+    "Start or continue the task now in this same conversation. Reconcile any existing side effects before creating new ones.",
+  ].join("\n");
+}

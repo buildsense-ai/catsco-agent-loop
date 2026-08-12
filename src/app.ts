@@ -66,7 +66,11 @@ export function createLoopApi(controller: LoopController, store: RunStore) {
         send(response, 200, { ok: true, service: "catsco-agent-loop" });
         return;
       }
-      if (bearer(request) !== controller.config.operatorToken) throw new HttpError(401, "unauthorized");
+      // The Artifact is a public status board: all Run reads, evidence views,
+      // and validated ZIP downloads are intentionally unauthenticated. Only
+      // state-changing requests require the operator credential.
+      const publicRunRead = request.method === "GET" && url.pathname.startsWith("/api/runs");
+      if (!publicRunRead && bearer(request) !== controller.config.operatorToken) throw new HttpError(401, "unauthorized");
 
       if (request.method === "POST" && url.pathname === "/api/runs") {
         const body = await jsonBody(request) as CreateRunInput;

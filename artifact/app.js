@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
+const defaultApiUrl = `${window.location.protocol}//${window.location.hostname}:19993`;
 const state = {
-  apiUrl: sessionStorage.getItem("catsloop.apiUrl") || "",
+  apiUrl: defaultApiUrl,
   token: sessionStorage.getItem("catsloop.operatorToken") || "",
   runs: [], events: new Map(), findings: new Map(), expanded: new Set(),
   filter: "all", connected: false, refreshing: false,
@@ -63,9 +64,11 @@ function short(value, length = 9) { return value ? String(value).slice(0, length
 function title(request) { return String(request || "未命名任务").replace(/\s+/g, " ").trim(); }
 
 async function api(path, options = {}, raw = false) {
+  const headers = { ...(options.body ? { "content-type": "application/json" } : {}), ...(options.headers || {}) };
+  if (state.token) headers.authorization = `Bearer ${state.token}`;
   const response = await fetch(new URL(path, state.apiUrl), {
     ...options,
-    headers: { authorization: `Bearer ${state.token}`, ...(options.body ? { "content-type": "application/json" } : {}), ...(options.headers || {}) },
+    headers,
   });
   if (raw) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -233,14 +236,14 @@ function render(){
 async function loadEvents(run){try{const body=await api(`/api/runs/${run.run_id}/events?after=0`);state.events.set(run.run_id,body.events||[]);}catch{state.events.set(run.run_id,[]);}}
 async function loadFinding(run){const finding=run.latest_finding;if(!finding)return;const key=`${run.run_id}:${finding.version}`;if(state.findings.has(key))return;try{state.findings.set(key,await api(`/api/runs/${run.run_id}/findings/${finding.version}`));}catch(error){state.findings.set(key,{error:error.message});}}
 async function downloadFinding(run,finding){try{const response=await api(`/api/runs/${run.run_id}/findings/${finding.version}/download`,{},true);const url=URL.createObjectURL(await response.blob());const a=node("a");a.href=url;a.download=`finding-v${finding.version}.zip`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(error){toast(error.message);}}
-async function refresh(silent=false){if(state.refreshing||!state.token||!state.apiUrl)return;state.refreshing=true;try{const body=await api("/api/runs");state.runs=body.runs||[];await Promise.all(state.runs.map(loadEvents));setConnection(true,"已连接");$("lastSync").textContent=`更新于 ${clock(new Date().toISOString())}`;render();if(!silent)toast("状态已刷新");}catch(error){setConnection(false,"连接失败");if(!silent)toast(error.message);}finally{state.refreshing=false;}}
-async function runAction(run,action){if(action==="cancel"&&!confirm("确认取消这个任务？已有会话、PR 和历史文件都会保留。"))return;try{const updated=await api(`/api/runs/${run.run_id}/${action}`,{method:"POST"});const index=state.runs.findIndex(item=>item.run_id===run.run_id);if(index>=0)state.runs[index]=updated;await loadEvents(updated);render();toast(action==="pause"?"任务已软暂停":action==="resume"?"任务已恢复":action==="cancel"?"任务已取消":"核对完成");}catch(error){toast(error.message);}}
+async function refresh(silent=false){if(state.refreshing||!state.apiUrl)return;state.refreshing=true;try{const body=await api("/api/runs");state.runs=body.runs||[];await Promise.all(state.runs.map(loadEvents));setConnection(true,"公开实时");$("lastSync").textContent=`更新于 ${clock(new Date().toISOString())}`;render();if(!silent)toast("状态已刷新");}catch(error){setConnection(false,"连接失败");if(!silent)toast(error.message);}finally{state.refreshing=false;}}
+async function runAction(run,action){if(!state.token){$("operatorToken").value="";$("connectionDialog").showModal();toast("管理操作需要授权");return;}if(action==="cancel"&&!confirm("确认取消这个任务？已有会话、PR 和历史文件都会保留。"))return;try{const updated=await api(`/api/runs/${run.run_id}/${action}`,{method:"POST"});const index=state.runs.findIndex(item=>item.run_id===run.run_id);if(index>=0)state.runs[index]=updated;await loadEvents(updated);render();toast(action==="pause"?"任务已软暂停":action==="resume"?"任务已恢复":action==="cancel"?"任务已取消":"核对完成");}catch(error){if(/401|unauthorized/i.test(error.message)){state.token="";sessionStorage.removeItem("catsloop.operatorToken");}toast(error.message);}}
 
-$("connectionButton").onclick=()=>{$("apiUrl").value=state.apiUrl;$("operatorToken").value=state.token;$("connectionDialog").showModal();};
+$("connectionButton").onclick=()=>{$("operatorToken").value=state.token;$("connectionDialog").showModal();};
 $("refreshButton").onclick=()=>refresh();
 document.querySelectorAll("[data-close]").forEach(button=>button.onclick=()=>button.closest("dialog").close());
 document.querySelectorAll("[data-filter]").forEach(button=>button.onclick=()=>{state.filter=button.dataset.filter;document.querySelectorAll("[data-filter]").forEach(item=>item.classList.toggle("active",item===button));render();});
-$("connectionForm").onsubmit=async(event)=>{event.preventDefault();state.apiUrl=$("apiUrl").value.trim().replace(/\/$/,"");state.token=$("operatorToken").value;sessionStorage.setItem("catsloop.apiUrl",state.apiUrl);sessionStorage.setItem("catsloop.operatorToken",state.token);$("connectionDialog").close();await refresh();};
+$("connectionForm").onsubmit=async(event)=>{event.preventDefault();state.token=$("operatorToken").value;sessionStorage.setItem("catsloop.operatorToken",state.token);$("connectionDialog").close();toast("管理授权已保存");};
 setInterval(()=>{document.querySelectorAll(".live-total").forEach(item=>item.textContent=elapsed(item.dataset.start,item.dataset.end));document.querySelectorAll(".timing .live").forEach(()=>{});},1000);
 setInterval(()=>refresh(true),5000);
-if(state.token&&state.apiUrl)refresh(true);else{setConnection(false,"未连接");render();}
+refresh(true);
