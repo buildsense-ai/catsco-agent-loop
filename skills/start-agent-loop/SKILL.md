@@ -26,7 +26,7 @@ description: 通过 CatsCompany Loop Controller 启动 Monday 审查与 Develope
 运行：
 
 ```bash
-node scripts/start-loop.mjs --request-file <utf8-file> --repo <owner/name> --idempotency-key <stable-id>
+node <SKILL_DIR>/scripts/start-loop.mjs --request-file <utf8-file> --repo <owner/name> --idempotency-key <stable-id>
 ```
 
 - 将当前 CatsCompany 用户消息 ID 用作稳定 ID；确认消息后启动时使用确认消息 ID。
