@@ -46,7 +46,15 @@ export class FakeCatsco implements ICatscoClient {
     const existing = topic.messages.find((message) => message.client_msg_id === input.clientMsgId);
     if (existing) return { id: existing.id, seq_id: existing.id, topic_id: input.topicId, client_msg_id: input.clientMsgId, duplicate: true };
     const id = this.nextMessage++;
-    topic.messages.push({ id, seq_id: id, topic_id: input.topicId, from_uid: 363, content: input.text, client_msg_id: input.clientMsgId });
+    topic.messages.push({
+      id,
+      seq_id: id,
+      topic_id: input.topicId,
+      from_uid: 363,
+      content: input.text,
+      client_msg_id: input.clientMsgId,
+      metadata: input.targetAgentUid ? { mentions: [`usr${input.targetAgentUid}`] } : undefined,
+    });
     return { id, seq_id: id, topic_id: input.topicId, client_msg_id: input.clientMsgId, duplicate: false };
   }
 

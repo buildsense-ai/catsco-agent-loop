@@ -92,6 +92,7 @@ export class CatscoClient implements ICatscoClient {
         client_msg_id: input.clientMsgId,
         content: input.text,
         content_blocks: contentBlocks,
+        ...(input.targetAgentUid ? { mentions: [`usr${input.targetAgentUid}`] } : {}),
         mode: "code",
         role: "user",
         msg_type: "text",
