@@ -4,9 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
 
 const root = await mkdtemp(join(tmpdir(), "start-agent-loop-"));
 const requestFile = join(root, "request.md");
+const skill = await readFile(new URL("../SKILL.md", import.meta.url), "utf8");
+if (!skill.includes("node <SKILL_DIR>/scripts/start-loop.mjs")) {
+  throw new Error("Skill must invoke the launcher through the absolute <SKILL_DIR> placeholder");
+}
 await writeFile(requestFile, "实现并验证这个需求\n", "utf8");
 let captured;
 const server = createServer(async (request, response) => {
