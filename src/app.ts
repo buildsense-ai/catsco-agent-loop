@@ -70,7 +70,11 @@ export function createLoopApi(controller: LoopController, store: RunStore) {
       // and validated ZIP downloads are intentionally unauthenticated. Only
       // state-changing requests require the operator credential.
       const publicRunRead = request.method === "GET" && url.pathname.startsWith("/api/runs");
-      if (!publicRunRead && bearer(request) !== controller.config.operatorToken) throw new HttpError(401, "unauthorized");
+      const publicArtifactPause = request.method === "POST"
+        && /^\/api\/runs\/run_[A-Za-z0-9_-]+\/pause$/.test(url.pathname)
+        && Boolean(origin)
+        && origin === controller.config.allowedOrigin;
+      if (!publicRunRead && !publicArtifactPause && bearer(request) !== controller.config.operatorToken) throw new HttpError(401, "unauthorized");
 
       if (request.method === "POST" && url.pathname === "/api/runs") {
         const body = await jsonBody(request) as CreateRunInput;

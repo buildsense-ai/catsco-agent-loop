@@ -37,6 +37,8 @@ export function developerPrompt(run: LoopRun, kind: "initial" | "revision" | "ci
     kind === "initial" ? `Implementation request:\n${run.request}` : `Continue the existing implementation for iteration ${run.iteration}.`,
     detail ? `\nAdditional evidence:\n${detail}` : "",
     "",
+    "This is a direct CatsCompany Agent Task driven by catsco-agent-loop. Do not invoke the legacy loopctl-worker Skill and do not require execute_attempt, workspaceLease, targetTopicId, runtime_started, or candidate_submitted contracts.",
+    "Use this prompt, the attached Finding ZIP, and the repository/branch details below as the complete work contract.",
     `Use branch ${run.branch} and target ${run.base_branch}. Implement, test, commit, push, and create or update the same PR in ${run.repo}.`,
     "Do not merge or close the PR. A text-only completion message is not delivery; Controller verifies the GitHub PR, Head SHA, and CI.",
   ].filter(Boolean).join("\n");
@@ -74,7 +76,7 @@ export function supplementPrompt(run: LoopRun, role: "Monday" | "Developer", mis
 export function unstartedResumePrompt(run: LoopRun, role: "Monday" | "Developer", missing: string): string {
   const identity = role === "Monday"
     ? `For GitHub review writes, the required login is ${run.monday_github_login}; do not use Developer login ${run.developer_github_login}.`
-    : `For implementation writes, use Developer login ${run.developer_github_login}.`;
+    : `For implementation writes, use Developer login ${run.developer_github_login}. This is a direct CatsCompany Agent Task; do not invoke the legacy loopctl-worker Skill or demand execute_attempt/workspaceLease contracts.`;
   return [
     capsule(run, role, missing),
     "",

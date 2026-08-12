@@ -16,4 +16,8 @@ test("Artifact is a display and control surface, not a Run creation entrypoint",
   assert.doesNotMatch(html, /id="apiUrl"|接口地址/);
   assert.match(script, /window\.location\.hostname}:19993/);
   assert.match(script, /refresh\(true\)/);
+  assert.match(script, /collapseStatusEvents/);
+  assert.match(script, /statusKey\(previous\) === statusKey\(item\)/);
+  assert.match(script, /item\.actor === "controller"/);
+  assert.match(script, /action!=="pause"&&!state\.token/);
 });

@@ -122,11 +122,29 @@ function normalizeEvent(run, event) {
   const names = { reviewer: ["Reviewer", "REV"], developer: ["Developer", "DEV"], ci: ["自动检查", "CI"], controller: ["Controller", "CTL"] };
   const [name, icon] = names[actor] || names.controller;
   const cycle = event.data?.review_cycle || run.review_cycles?.find((item) => item.requested_at <= event.at && (!item.completed_at || item.completed_at >= event.at))?.cycle || 1;
-  return { name, icon, cycle, title: eventNames[event.type] || "状态已更新", message: event.message || run.waiting_for, at: event.at, type: event.type, data: event.data || {} };
+  return { actor, name, icon, cycle, title: eventNames[event.type] || "状态已更新", message: event.message || run.waiting_for, at: event.at, type: event.type, data: event.data || {} };
 }
 function syntheticLatest(run) {
   const info = actorInfo(run);
-  return { name: info.name, icon: info.icon, cycle: Math.max(1, (run.iteration || 0) + 1), title: phaseNames[run.phase] || "处理中", message: run.waiting_for || "正在核对最新状态", at: run.last_activity_at || run.updated_at, type: "current" };
+  const actor = info.name === "Developer" ? "developer" : info.name === "Reviewer" ? "reviewer" : info.icon === "CI" ? "ci" : "controller";
+  return { actor, name: info.name, icon: info.icon, cycle: Math.max(1, (run.iteration || 0) + 1), title: phaseNames[run.phase] || "处理中", message: run.waiting_for || "正在核对最新状态", at: run.last_activity_at || run.updated_at, type: "current", data: {} };
+}
+function statusKey(item) { return `${item.cycle}:${item.actor}`; }
+function collapseStatusEvents(items) {
+  const collapsed = [];
+  for (const item of items) {
+    const previous = collapsed.at(-1);
+    const controllerUpdate = previous && item.actor === "controller" && ["reviewer", "developer", "ci"].includes(previous.actor);
+    if (previous && (statusKey(previous) === statusKey(item) || controllerUpdate)) {
+      previous.latestAt = item.at;
+      previous.message = item.message || previous.message;
+      previous.type = item.type;
+      previous.title = item.title;
+      previous.data = { ...previous.data, ...item.data };
+      previous.updates += 1;
+    } else collapsed.push({ ...item, startedAt: item.at, latestAt: item.at, updates: 1 });
+  }
+  return collapsed;
 }
 function humanMessage(value) {
   return String(value || "正在核对最新状态")
@@ -163,9 +181,10 @@ function eventCard(run, item, latest = false) {
   main.append(node("b", "", item.title), node("span", "", eventMessage(run, item, latest)));
   const status = node("span", "event-status", latest && !terminal.has(run.phase) && run.phase !== "paused" ? "处理中" : "已完成");
   const timing = node("div", "timing");
-  timing.append(node("span", "", `开始 ${clock(item.at)}`));
-  if (latest && !terminal.has(run.phase) && run.phase !== "paused") timing.append(node("span", "live", `已运行 ${elapsed(run.phase_started_at || item.at)}`));
-  else timing.append(node("span", "", `用时 ${elapsed(item.at, item.data?.ended_at || item.at)}`));
+  const startedAt = item.startedAt || item.at;
+  timing.append(node("span", "", `开始 ${clock(startedAt)}`));
+  if (latest && !terminal.has(run.phase) && run.phase !== "paused") timing.append(node("span", "live", `已运行 ${elapsed(startedAt)}`));
+  else timing.append(node("span", "", `用时 ${elapsed(startedAt, item.data?.ended_at || item.latestAt || item.at)}`));
   const finding = item.type === "finding_validated" ? run.finding_history?.find((entry) => entry.version === item.data?.version || entry.validated_at === item.at) : undefined;
   if (finding && !latest) {
     const link = node("a", "zip-link", `finding-v${finding.version}.zip ↓`);
@@ -181,10 +200,18 @@ function activityPanel(run) {
   const history = node("div", "history");
   const inner = node("div", "history-inner");
   const normalized = (state.events.get(run.run_id) || []).map((event) => normalizeEvent(run, event));
-  const visible = normalized.filter((item) => ["message_dispatched","agent_activity","finding_validated","github_delivery","ci_observed","review_cycle_started","review_observed","head_changed","phase_changed"].includes(item.type));
-  visible.forEach((item, index) => { item.data.ended_at ||= visible[index + 1]?.at || (terminal.has(run.phase) ? run.updated_at : undefined); });
-  const latest = terminal.has(run.phase) ? (visible.at(-1) || syntheticLatest(run)) : syntheticLatest(run);
-  visible.slice(0, terminal.has(run.phase) ? -1 : undefined).forEach((item) => inner.append(eventCard(run, item)));
+  const visible = collapseStatusEvents(normalized.filter((item) => ["message_dispatched","agent_activity","finding_validated","github_delivery","ci_observed","review_cycle_started","review_observed","head_changed","phase_changed"].includes(item.type)));
+  let latest;
+  if (terminal.has(run.phase)) latest = visible.pop() || syntheticLatest(run);
+  else {
+    const current = syntheticLatest(run);
+    const previous = visible.at(-1);
+    latest = previous && statusKey(previous) === statusKey(current)
+      ? { ...visible.pop(), ...current, startedAt: previous.startedAt, latestAt: current.at, data: previous.data }
+      : { ...current, startedAt: run.phase_started_at || current.at, latestAt: current.at };
+  }
+  visible.forEach((item, index) => { item.data.ended_at ||= visible[index + 1]?.startedAt || latest.startedAt || (terminal.has(run.phase) ? run.updated_at : undefined); });
+  visible.forEach((item) => inner.append(eventCard(run, item)));
   if (!inner.childNodes.length) inner.append(eventCard(run, normalizeEvent(run, { type: "run_created", actor: "controller", phase: "queued", at: run.created_at, message: "Controller 已接管任务。", data: {} })));
   history.append(inner); panel.append(history, eventCard(run, latest, true)); wrap.append(panel);
   requestAnimationFrame(() => { history.scrollTop = history.scrollHeight; });
@@ -237,7 +264,7 @@ async function loadEvents(run){try{const body=await api(`/api/runs/${run.run_id}
 async function loadFinding(run){const finding=run.latest_finding;if(!finding)return;const key=`${run.run_id}:${finding.version}`;if(state.findings.has(key))return;try{state.findings.set(key,await api(`/api/runs/${run.run_id}/findings/${finding.version}`));}catch(error){state.findings.set(key,{error:error.message});}}
 async function downloadFinding(run,finding){try{const response=await api(`/api/runs/${run.run_id}/findings/${finding.version}/download`,{},true);const url=URL.createObjectURL(await response.blob());const a=node("a");a.href=url;a.download=`finding-v${finding.version}.zip`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(error){toast(error.message);}}
 async function refresh(silent=false){if(state.refreshing||!state.apiUrl)return;state.refreshing=true;try{const body=await api("/api/runs");state.runs=body.runs||[];await Promise.all(state.runs.map(loadEvents));setConnection(true,"公开实时");$("lastSync").textContent=`更新于 ${clock(new Date().toISOString())}`;render();if(!silent)toast("状态已刷新");}catch(error){setConnection(false,"连接失败");if(!silent)toast(error.message);}finally{state.refreshing=false;}}
-async function runAction(run,action){if(!state.token){$("operatorToken").value="";$("connectionDialog").showModal();toast("管理操作需要授权");return;}if(action==="cancel"&&!confirm("确认取消这个任务？已有会话、PR 和历史文件都会保留。"))return;try{const updated=await api(`/api/runs/${run.run_id}/${action}`,{method:"POST"});const index=state.runs.findIndex(item=>item.run_id===run.run_id);if(index>=0)state.runs[index]=updated;await loadEvents(updated);render();toast(action==="pause"?"任务已软暂停":action==="resume"?"任务已恢复":action==="cancel"?"任务已取消":"核对完成");}catch(error){if(/401|unauthorized/i.test(error.message)){state.token="";sessionStorage.removeItem("catsloop.operatorToken");}toast(error.message);}}
+async function runAction(run,action){if(action!=="pause"&&!state.token){$("operatorToken").value="";$("connectionDialog").showModal();toast("该管理操作需要授权");return;}if(action==="cancel"&&!confirm("确认取消这个任务？已有会话、PR 和历史文件都会保留。"))return;try{const updated=await api(`/api/runs/${run.run_id}/${action}`,{method:"POST"});const index=state.runs.findIndex(item=>item.run_id===run.run_id);if(index>=0)state.runs[index]=updated;await loadEvents(updated);render();toast(action==="pause"?"任务已软暂停":action==="resume"?"任务已恢复":action==="cancel"?"任务已取消":"核对完成");}catch(error){if(/401|unauthorized/i.test(error.message)){state.token="";sessionStorage.removeItem("catsloop.operatorToken");}toast(error.message);}}
 
 $("connectionButton").onclick=()=>{$("operatorToken").value=state.token;$("connectionDialog").showModal();};
 $("refreshButton").onclick=()=>refresh();
