@@ -38,8 +38,16 @@ function appendText(parent, text) {
 function safeLinkTarget(value) {
   const raw = String(value || "").trim();
   if (!raw || raw.startsWith("//") || raw.includes("\\")) return null;
-  let decoded = raw.replace(/&#(?:x([0-9a-f]+)|(\d+));?/gi, (_, hex, decimal) => String.fromCodePoint(Number.parseInt(hex || decimal, hex ? 16 : 10)))
-    .replace(/&colon;/gi, ":").replace(/&tab;|&newline;/gi, "");
+  let invalidReference = false;
+  let decoded = raw.replace(/&#(?:x([0-9a-f]+)|(\d+));?/gi, (_, hex, decimal) => {
+    const codePoint = Number.parseInt(hex || decimal, hex ? 16 : 10);
+    if (!Number.isInteger(codePoint) || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+      invalidReference = true;
+      return "";
+    }
+    return String.fromCodePoint(codePoint);
+  }).replace(/&colon;/gi, ":").replace(/&tab;|&newline;/gi, "");
+  if (invalidReference) return null;
   for (let index = 0; index < 3; index += 1) {
     try { const next = decodeURIComponent(decoded); if (next === decoded) break; decoded = next; } catch { break; }
   }

@@ -135,6 +135,7 @@ test("Artifact keeps a fixed latest Finding download beside the heading without 
     "<script>globalThis.pwned = true</script>",
     "<img src=x onerror=globalThis.pwned=true>",
     "[bad scheme](javascript:alert(1)) [encoded bad](jav&#x61;script:alert(1))",
+    "[hex overflow](&#x110000;) [decimal overflow](&#1114112;)",
   ].join("\n");
   Object.assign(context, { markdownFixture: markdown });
   const rendered = vm.runInContext("renderFindingMarkdown(markdownFixture)", context) as FakeArtifactElement;
