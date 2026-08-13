@@ -123,7 +123,7 @@ test("API exposes Run reads publicly, protects writes, enforces exact CORS origi
     assert.equal(publicRead.status, 200);
     const allowed = await fetch(`${base}/api/runs`, { headers: { origin: "https://artifact.example:19991" } });
     assert.equal(allowed.status, 200);
-    assert.equal(allowed.headers.get("access-control-allow-origin"), "https://artifact.example:19991");
+    assert.equal(allowed.headers.get("access-control-allow-origin"), "*");
     const listed = await allowed.json() as { runs: LoopRun[] };
     assert.equal(listed.runs[0]?.activity_state, "quiet");
     assert.ok(listed.runs[0]?.last_activity_at);
@@ -136,8 +136,11 @@ test("API exposes Run reads publicly, protects writes, enforces exact CORS origi
     assert.ok(body.last_progress_at);
     assert.ok(body.phase_started_at);
     assert.equal((await fetch(`${base}/api/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request: "work", repo: "acme/widget" }) })).status, 401);
-    const denied = await fetch(`${base}/api/runs`, { headers: { authorization: "Bearer secret", origin: "https://evil.example" } });
-    assert.equal(denied.status, 403);
+    const crossOriginRead = await fetch(`${base}/api/runs`, { headers: { origin: "https://status-preview.example" } });
+    assert.equal(crossOriginRead.status, 200);
+    assert.equal(crossOriginRead.headers.get("access-control-allow-origin"), "*");
+    const deniedWrite = await fetch(`${base}/api/runs`, { method: "POST", headers: { authorization: "Bearer secret", "content-type": "application/json", origin: "https://evil.example" }, body: JSON.stringify({ request: "work", repo: "acme/widget" }) });
+    assert.equal(deniedWrite.status, 403);
   } finally {
     await api.close();
   }
