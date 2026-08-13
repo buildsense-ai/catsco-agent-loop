@@ -183,8 +183,11 @@ function eventCard(run, item, latest = false) {
   const timing = node("div", "timing");
   const startedAt = item.startedAt || item.at;
   timing.append(node("span", "", `开始 ${clock(startedAt)}`));
-  if (latest && !terminal.has(run.phase) && run.phase !== "paused") timing.append(node("span", "live", `已运行 ${elapsed(startedAt)}`));
-  else timing.append(node("span", "", `用时 ${elapsed(startedAt, item.data?.ended_at || item.latestAt || item.at)}`));
+  if (latest && !terminal.has(run.phase) && run.phase !== "paused") {
+    const live = node("span", "live", `已运行 ${elapsed(startedAt)}`);
+    live.dataset.start = startedAt;
+    timing.append(live);
+  } else timing.append(node("span", "", `用时 ${elapsed(startedAt, item.data?.ended_at || item.latestAt || item.at)}`));
   const finding = item.type === "finding_validated" ? run.finding_history?.find((entry) => entry.version === item.data?.version || entry.validated_at === item.at) : undefined;
   if (finding && !latest) {
     const link = node("a", "zip-link", `finding-v${finding.version}.zip ↓`);
@@ -271,6 +274,6 @@ $("refreshButton").onclick=()=>refresh();
 document.querySelectorAll("[data-close]").forEach(button=>button.onclick=()=>button.closest("dialog").close());
 document.querySelectorAll("[data-filter]").forEach(button=>button.onclick=()=>{state.filter=button.dataset.filter;document.querySelectorAll("[data-filter]").forEach(item=>item.classList.toggle("active",item===button));render();});
 $("connectionForm").onsubmit=async(event)=>{event.preventDefault();state.token=$("operatorToken").value;sessionStorage.setItem("catsloop.operatorToken",state.token);$("connectionDialog").close();toast("管理授权已保存");};
-setInterval(()=>{document.querySelectorAll(".live-total").forEach(item=>item.textContent=elapsed(item.dataset.start,item.dataset.end));document.querySelectorAll(".timing .live").forEach(()=>{});},1000);
+setInterval(()=>{document.querySelectorAll(".live-total").forEach(item=>item.textContent=elapsed(item.dataset.start,item.dataset.end));document.querySelectorAll(".timing .live").forEach(item=>item.textContent=`已运行 ${elapsed(item.dataset.start)}`);},1000);
 setInterval(()=>refresh(true),5000);
 refresh(true);
