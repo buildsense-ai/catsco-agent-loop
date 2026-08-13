@@ -308,7 +308,10 @@ export class LoopController {
     return await this.withRunLock(runId, async () => {
       const run = await this.store.readRun(runId);
       if (isTerminalPhase(run.phase) && !["blocked", "blocked_auth", "blocked_github_auth"].includes(run.phase)) return run;
-      return await this.process(run, true);
+      const phase = run.phase;
+      const reconciled = await this.process(run, true);
+      if (reconciled.phase !== phase || isTerminalPhase(reconciled.phase)) return reconciled;
+      return await this.wakeExplicitlyReconciledStall(reconciled);
     });
   }
 
@@ -835,6 +838,31 @@ export class LoopController {
       });
     }
     return await this.transition(run, phase, this.actorFor(phase), run.waiting_for.replace(/; recovery scheduled$/, ""), "Recovery prompt sent to the original Topic after reconciliation.");
+  }
+
+  private async wakeExplicitlyReconciledStall(run: LoopRun): Promise<LoopRun> {
+    const agent = activityAgent(run);
+    if (run.activity_state !== "suspected_stall" || !agent?.topic_id || agent.episode?.state !== "running") return run;
+    const role = agent === run.developer ? "Developer" : "Monday";
+    const fingerprint = createHash("sha256")
+      .update(`${run.phase}:${agent.episode.run_id}:${run.last_activity_at}`)
+      .digest("hex")
+      .slice(0, 12);
+    const action = `manual-reconcile-stall-${role.toLowerCase()}-${fingerprint}`;
+    if (run.receipts[`${run.run_id}:${action}`]) return run;
+    if (role === "Monday") run.monday_attempt += 1;
+    else run.developer_attempt += 1;
+    await this.dispatch(run, agent, action, {
+      topicId: agent.topic_id,
+      clientMsgId: "",
+      text: supplementPrompt(run, role, run.waiting_for || "the current mechanical delivery"),
+    });
+    await this.store.appendEvent(run, {
+      type: "stalled_episode_woken",
+      message: `Operator reconcile explicitly woke the stalled ${role} Episode in its original Topic.`,
+      data: { role, topic_id: agent.topic_id, episode_run_id: agent.episode?.run_id },
+    });
+    return run;
   }
 
   private async detectManualMessage(run: LoopRun): Promise<boolean> {

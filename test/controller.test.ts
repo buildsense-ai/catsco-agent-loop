@@ -603,6 +603,36 @@ test("operator soft pause sends no message and resume continues the same Topic",
   assert.equal(ctx.catsco.topics.get(topicId)!.messages.length, messageCount, "resume reconciles before any later continuation");
 });
 
+test("operator reconcile wakes a suspected stalled running Episode once in the original Topic", async () => {
+  const ctx = await setup();
+  let run = await ctx.controller.createRun({ request: "work", repo: "acme/widget" });
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  const topicId = run.monday.topic_id!;
+  ctx.catsco.topics.get(topicId)!.episode = {
+    topic_id: topicId,
+    run_id: "episode_stalled",
+    state: "running",
+    source_uid: run.monday.agent_uid,
+    updated_at: new Date().toISOString(),
+  };
+  await ctx.controller.tick();
+  run = await ctx.store.readRun(run.run_id);
+  run.last_activity_at = new Date(Date.now() - ctx.config.activityStallMs - 1_000).toISOString();
+  await ctx.store.writeRun(run);
+  const before = ctx.catsco.topics.get(topicId)!.messages.length;
+
+  await ctx.controller.tick();
+  assert.equal(ctx.catsco.topics.get(topicId)!.messages.length, before, "automatic polling must not interrupt a running Episode");
+  run = await ctx.controller.reconcile(run.run_id);
+  assert.equal(ctx.catsco.topics.get(topicId)!.messages.length, before + 1);
+  assert.equal(run.monday.topic_id, topicId);
+  assert.match(String(ctx.catsco.topics.get(topicId)!.messages.at(-1)?.content), /Current missing mechanical delivery/);
+
+  await ctx.controller.reconcile(run.run_id);
+  assert.equal(ctx.catsco.topics.get(topicId)!.messages.length, before + 1, "the same stalled observation must be idempotent");
+});
+
 test("operator resume wakes a mechanically blocked delivery that never started an Episode", async () => {
   const ctx = await setup();
   let run = await ctx.controller.createRun({ request: "work", repo: "acme/widget" });
