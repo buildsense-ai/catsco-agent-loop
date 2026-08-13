@@ -7,6 +7,7 @@ const state = {
   apiUrl: defaultApiUrl,
   token: sessionStorage.getItem("catsloop.operatorToken") || "",
   runs: [], events: new Map(), findings: new Map(), expanded: new Set(),
+  selectedFindings: new Map(), findingScroll: new Map(),
   filter: "all", connected: false, refreshing: false,
 };
 const terminal = new Set(["completed", "cancelled", "blocked", "blocked_auth", "blocked_github_auth"]);
@@ -30,6 +31,117 @@ function node(tag, className = "", text = "") {
   if (className) element.className = className;
   if (text !== "") element.textContent = text;
   return element;
+}
+function appendText(parent, text) {
+  if (text) parent.append(node("span", "", text));
+}
+function safeLinkTarget(value) {
+  const raw = String(value || "").trim();
+  if (!raw || raw.startsWith("//") || raw.includes("\\")) return null;
+  let decoded = raw.replace(/&#(?:x([0-9a-f]+)|(\d+));?/gi, (_, hex, decimal) => String.fromCodePoint(Number.parseInt(hex || decimal, hex ? 16 : 10)))
+    .replace(/&colon;/gi, ":").replace(/&tab;|&newline;/gi, "");
+  for (let index = 0; index < 3; index += 1) {
+    try { const next = decodeURIComponent(decoded); if (next === decoded) break; decoded = next; } catch { break; }
+  }
+  const compact = decoded.replace(/[\u0000-\u0020\u007f]+/g, "").toLowerCase();
+  const scheme = compact.match(/^([a-z][a-z0-9+.-]*):/i)?.[1];
+  if (scheme && !["http", "https", "mailto"].includes(scheme)) return null;
+  if (!scheme && !/^(?:[./#?]|[^:]+$)/.test(compact)) return null;
+  return raw;
+}
+function appendInlineMarkdown(parent, source) {
+  const text = String(source || "");
+  const token = /(`+)([^`\n]+?)\1|\[([^\]\n]+)\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)|(\*\*|__)(.+?)\5|(?<!\*)\*([^*\n]+)\*(?!\*)|(?<!_)_([^_\n]+)_(?!_)/g;
+  let cursor = 0;
+  for (const match of text.matchAll(token)) {
+    appendText(parent, text.slice(cursor, match.index));
+    if (match[1]) parent.append(node("code", "", match[2]));
+    else if (match[3]) {
+      const href = safeLinkTarget(match[4]);
+      if (!href) appendText(parent, match[3]);
+      else {
+        const link = node("a", "", match[3]);
+        link.href = href;
+        if (/^https?:/i.test(href)) { link.target = "_blank"; link.rel = "noopener noreferrer"; }
+        parent.append(link);
+      }
+    } else if (match[5]) {
+      const strong = node("strong"); appendInlineMarkdown(strong, match[6]); parent.append(strong);
+    } else {
+      const emphasis = node("em"); appendInlineMarkdown(emphasis, match[7] || match[8]); parent.append(emphasis);
+    }
+    cursor = (match.index || 0) + match[0].length;
+  }
+  appendText(parent, text.slice(cursor));
+}
+function startsMarkdownBlock(line) {
+  return /^\s*$|^ {0,3}(?:#{1,6}\s+|>|```|~~~|(?:[-+*]|\d+[.)])\s+)/.test(line);
+}
+function appendMarkdownBlocks(container, markdown) {
+  const lines = String(markdown || "").replace(/\r\n?/g, "\n").split("\n");
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index];
+    if (!line.trim()) { index += 1; continue; }
+    const fence = line.match(/^ {0,3}(`{3,}|~{3,})([^`]*)$/);
+    if (fence) {
+      const body = []; const marker = fence[1][0]; const minimum = fence[1].length; index += 1;
+      const closesFence = (candidate) => { const trimmed = candidate.trim(); return trimmed.length >= minimum && [...trimmed].every((character) => character === marker); };
+      while (index < lines.length && !closesFence(lines[index])) body.push(lines[index++]);
+      if (index < lines.length) index += 1;
+      const pre = node("pre"); pre.append(node("code", "", body.join("\n"))); container.append(pre); continue;
+    }
+    const heading = line.match(/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) { const element = node(`h${heading[1].length}`); appendInlineMarkdown(element, heading[2]); container.append(element); index += 1; continue; }
+    if (/^ {0,3}>/.test(line)) {
+      const quote = [];
+      while (index < lines.length && /^ {0,3}>/.test(lines[index])) quote.push(lines[index++].replace(/^ {0,3}>\s?/, ""));
+      const blockquote = node("blockquote"); appendMarkdownBlocks(blockquote, quote.join("\n")); container.append(blockquote); continue;
+    }
+    const item = line.match(/^ {0,3}([-+*]|\d+[.)])\s+(.+)$/);
+    if (item) {
+      const ordered = /^\d/.test(item[1]); const list = node(ordered ? "ol" : "ul");
+      while (index < lines.length) {
+        const next = lines[index].match(/^ {0,3}([-+*]|\d+[.)])\s+(.+)$/);
+        if (!next || /^\d/.test(next[1]) !== ordered) break;
+        const listItem = node("li"); appendInlineMarkdown(listItem, next[2]); list.append(listItem); index += 1;
+      }
+      container.append(list); continue;
+    }
+    const paragraphLines = [line]; index += 1;
+    while (index < lines.length && !startsMarkdownBlock(lines[index])) paragraphLines.push(lines[index++]);
+    const paragraph = node("p");
+    paragraphLines.forEach((part, partIndex) => {
+      const hardBreak = / {2}$/.test(part);
+      appendInlineMarkdown(paragraph, part.replace(/ {2}$/, ""));
+      if (partIndex < paragraphLines.length - 1) paragraph.append(hardBreak ? node("br") : node("span", "", " "));
+    });
+    container.append(paragraph);
+  }
+}
+function renderFindingMarkdown(markdown) {
+  const container = node("div", "finding-copy finding-markdown");
+  appendMarkdownBlocks(container, markdown);
+  return container;
+}
+function findingVersions(run) {
+  const versions = [...(run.finding_history || [])];
+  if (run.latest_finding && !versions.some((item) => item.version === run.latest_finding.version)) versions.push(run.latest_finding);
+  return versions.sort((left, right) => left.version - right.version);
+}
+function selectedFinding(run) {
+  const versions = findingVersions(run);
+  const selectedVersion = state.selectedFindings.get(run.run_id);
+  return versions.find((item) => item.version === selectedVersion) || versions.find((item) => item.version === run.latest_finding?.version) || versions.at(-1);
+}
+function findingKey(run, finding) { return `${run.run_id}:${finding.version}`; }
+function restoreFindingScroll(container, key) {
+  container.dataset.findingKey = key;
+  requestAnimationFrame(() => { container.scrollTop = state.findingScroll.get(key) || 0; });
+}
+function rememberFindingScroll() {
+  document.querySelectorAll(".finding-copy[data-finding-key]").forEach((container) => {
+    if (container.dataset.findingKey) state.findingScroll.set(container.dataset.findingKey, container.scrollTop);
+  });
 }
 function setConnection(value, label) {
   state.connected = value;
@@ -227,16 +339,28 @@ function activityPanel(run) {
 function taskDetail(run) {
   const detail = node("section", "detail");
   const main = node("div"); main.append(node("h3", "", "完整任务要求"), node("p", "request-copy", run.request));
-  const finding = run.latest_finding;
+  const versions = findingVersions(run);
+  const finding = selectedFinding(run);
   if (finding) {
     const heading = node("div", "finding-heading");
+    const title = node("h3", "", `${finding.version === run.latest_finding?.version ? "最新" : "历史"} Finding · v${finding.version}`);
+    const actions = node("div", "finding-actions");
+    if (versions.length > 1) {
+      const label = node("label", "finding-version");
+      label.append(node("span", "", "查看版本"));
+      const select = node("select"); select.setAttribute("aria-label", "Finding 版本");
+      versions.forEach((item) => { const option = node("option", "", `v${item.version}${item.version === run.latest_finding?.version ? " · 最新" : ""}`); option.value = String(item.version); option.selected = item.version === finding.version; select.append(option); });
+      select.addEventListener("change", async () => { state.selectedFindings.set(run.run_id, Number(select.value)); await loadFinding(run, selectedFinding(run)); render(); });
+      label.append(select); actions.append(label);
+    }
     const download = node("a", "finding-download", `下载 ZIP · v${finding.version} ↓`);
     download.href = `${state.apiUrl}/api/runs/${run.run_id}/findings/${finding.version}/download`;
     download.addEventListener("click", (event) => { event.preventDefault(); downloadFinding(run, finding); });
-    heading.append(node("h3", "", `最新 Finding · v${finding.version}`), download);
-    main.append(heading);
-    const loaded = state.findings.get(`${run.run_id}:${finding.version}`);
-    main.append(node("div", "finding-copy", loaded?.markdown || (loaded?.error ? `暂时无法读取：${loaded.error}` : "正在读取 FINDING.md…")));
+    actions.append(download); heading.append(title, actions); main.append(heading);
+    const key = findingKey(run, finding);
+    const loaded = state.findings.get(key);
+    const content = loaded?.markdown ? renderFindingMarkdown(loaded.markdown) : node("div", "finding-copy finding-empty", loaded?.error ? `暂时无法读取：${loaded.error}` : "正在读取 FINDING.md…");
+    restoreFindingScroll(content, key); main.append(content);
   }
   const aside = node("aside"); aside.append(node("h3", "", "机械状态"));
   const facts = node("dl", "facts");
@@ -265,13 +389,14 @@ function taskCard(run) {
 }
 function matches(run){if(state.filter==="active")return active.has(run.phase);if(state.filter==="done")return terminal.has(run.phase);return true;}
 function render(){
+  rememberFindingScroll();
   $("runCount").textContent=state.runs.length; $("activeCount").textContent=state.runs.filter(r=>active.has(r.phase)).length; $("doneCount").textContent=state.runs.filter(r=>terminal.has(r.phase)).length;
   const list=$("runList");list.replaceChildren();const runs=state.runs.filter(matches);
   if(!runs.length){const empty=node("div","empty");empty.append(node("span","","00"),node("h2","",state.connected?"目前没有符合条件的任务":"连接后查看自迭代任务"),node("p","",state.connected?"在与 Saturday 的会话中明确要求启动自迭代，任务会出现在这里。":"Artifact 只展示和管理任务，不负责创建任务。"));list.append(empty);return;}
   runs.forEach(run=>list.append(taskCard(run)));
 }
 async function loadEvents(run){try{const body=await api(`/api/runs/${run.run_id}/events?after=0`);state.events.set(run.run_id,body.events||[]);}catch{state.events.set(run.run_id,[]);}}
-async function loadFinding(run){const finding=run.latest_finding;if(!finding)return;const key=`${run.run_id}:${finding.version}`;if(state.findings.has(key))return;try{state.findings.set(key,await api(`/api/runs/${run.run_id}/findings/${finding.version}`));}catch(error){state.findings.set(key,{error:error.message});}}
+async function loadFinding(run,finding=selectedFinding(run)){if(!finding)return;const key=findingKey(run,finding);if(state.findings.has(key))return;try{state.findings.set(key,await api(`/api/runs/${run.run_id}/findings/${finding.version}`));}catch(error){state.findings.set(key,{error:error.message});}}
 async function downloadFinding(run,finding){try{const response=await api(`/api/runs/${run.run_id}/findings/${finding.version}/download`,{},true);const url=URL.createObjectURL(await response.blob());const a=node("a");a.href=url;a.download=`finding-v${finding.version}.zip`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(error){toast(error.message);}}
 async function refresh(silent=false){if(state.refreshing||!state.apiUrl)return;state.refreshing=true;try{const body=await api("/api/runs");state.runs=body.runs||[];await Promise.all(state.runs.map(loadEvents));setConnection(true,"公开实时");$("lastSync").textContent=`更新于 ${clock(new Date().toISOString())}`;render();if(!silent)toast("状态已刷新");}catch(error){setConnection(false,"连接失败");if(!silent)toast(error.message);}finally{state.refreshing=false;}}
 async function runAction(run,action){if(action!=="pause"&&!state.token){$("operatorToken").value="";$("connectionDialog").showModal();toast("该管理操作需要授权");return;}if(action==="cancel"&&!confirm("确认取消这个任务？已有会话、PR 和历史文件都会保留。"))return;try{const updated=await api(`/api/runs/${run.run_id}/${action}`,{method:"POST"});const index=state.runs.findIndex(item=>item.run_id===run.run_id);if(index>=0)state.runs[index]=updated;await loadEvents(updated);render();toast(action==="pause"?"任务已软暂停":action==="resume"?"任务已恢复":action==="cancel"?"任务已取消":"核对完成");}catch(error){if(/401|unauthorized/i.test(error.message)){state.token="";sessionStorage.removeItem("catsloop.operatorToken");}toast(error.message);}}
