@@ -581,6 +581,8 @@ test("Developer direct-task prompt rejects the legacy execute_attempt worker con
   const message = ctx.catsco.topics.get(run.developer.topic_id!)!.messages.at(-1)!;
   assert.match(String(message.content), /Do not invoke the legacy loopctl-worker Skill/);
   assert.match(String(message.content), /complete work contract/);
+  assert.match(String(message.content), /default authenticated gh identity/);
+  assert.match(String(message.content), /do not set, copy, or guess GH_CONFIG_DIR/);
 });
 
 test("operator soft pause sends no message and resume continues the same Topic", async () => {
