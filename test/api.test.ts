@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
+import { get } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -93,10 +95,11 @@ class PausingReadStore extends RunStore {
   }
 }
 
-async function writeFinding(path: string, markdown: string): Promise<void> {
+async function writeFinding(path: string, markdown: string, extraBytes = 0): Promise<void> {
   const zip = new yazl.ZipFile();
   zip.addBuffer(Buffer.from(markdown), "review/FINDING.md");
   zip.addBuffer(Buffer.from('{"version":1}\n'), "review/manifest.json");
+  if (extraBytes) zip.addBuffer(randomBytes(extraBytes), "review/evidence.bin");
   zip.end();
   await new Promise<void>((resolve, reject) => {
     zip.outputStream.pipe(createWriteStream(path)).once("close", resolve).once("error", reject);
@@ -211,6 +214,60 @@ test("API exposes validated Finding markdown and ZIP download without an operato
     assert.equal(download.headers.get("content-type"), "application/zip");
     assert.equal(download.headers.get("content-disposition"), 'attachment; filename="finding-v1.zip"');
     assert.ok((await download.arrayBuffer()).byteLength > 0);
+  } finally {
+    await api.close();
+  }
+});
+
+test("aborted Finding download does not crash the API", async () => {
+  const root = await mkdtemp(join(tmpdir(), "catsloop-api-aborted-download-"));
+  const store = new RunStore(root);
+  const run = runFixture();
+  run.run_id = "run_api_aborted_download";
+  run.branch = "loop/run_api_aborted_download";
+  const path = await store.findingPath(run.run_id, 1);
+  await writeFinding(path, "# Finding\n", 8 * 1024 * 1024);
+  run.finding_history = [{
+    version: 1,
+    id: "finding-abort",
+    name: "finding.zip",
+    url: "https://cats.example/uploads/finding.zip",
+    source_message_id: 9,
+    source_topic_id: "grp_monday",
+    size: (await readFile(path)).length,
+    sha256: "abort-test",
+    stored_path: path,
+    validated_at: new Date().toISOString(),
+  }];
+  run.latest_finding = run.finding_history[0];
+  await store.initialize(run);
+  const controller = {
+    config: { operatorToken: "secret", allowedOrigin: "https://artifact.example:19991" },
+  } as unknown as LoopController;
+  const api = createLoopApi(controller, store);
+  const address = await api.listen("127.0.0.1", 0);
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const request = get(`${base}/api/runs/${run.run_id}/findings/1/download`, (response) => {
+        response.once("data", () => {
+          response.destroy();
+          resolve();
+        });
+        response.once("error", (error) => {
+          if ((error as NodeJS.ErrnoException).code === "ECONNRESET") resolve();
+          else reject(error);
+        });
+      });
+      request.once("error", (error) => {
+        if ((error as NodeJS.ErrnoException).code === "ECONNRESET") resolve();
+        else reject(error);
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const health = await fetch(`${base}/health`);
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { ok: true, service: "catsco-agent-loop" });
   } finally {
     await api.close();
   }
