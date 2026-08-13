@@ -50,8 +50,11 @@ export function createLoopApi(controller: LoopController, store: RunStore) {
     try {
       const url = new URL(request.url ?? "/", "http://localhost");
       const origin = request.headers.origin;
-      if (origin && origin !== controller.config.allowedOrigin) throw new HttpError(403, "origin not allowed");
-      if (origin && controller.config.allowedOrigin && origin === controller.config.allowedOrigin) {
+      const publicRunRead = request.method === "GET" && url.pathname.startsWith("/api/runs");
+      if (origin && !publicRunRead && origin !== controller.config.allowedOrigin) throw new HttpError(403, "origin not allowed");
+      if (origin && publicRunRead) {
+        response.setHeader("access-control-allow-origin", "*");
+      } else if (origin && controller.config.allowedOrigin && origin === controller.config.allowedOrigin) {
         response.setHeader("access-control-allow-origin", origin);
         response.setHeader("vary", "Origin");
         response.setHeader("access-control-allow-headers", "authorization,content-type,idempotency-key");
@@ -69,7 +72,6 @@ export function createLoopApi(controller: LoopController, store: RunStore) {
       // The Artifact is a public status board: all Run reads, evidence views,
       // and validated ZIP downloads are intentionally unauthenticated. Only
       // state-changing requests require the operator credential.
-      const publicRunRead = request.method === "GET" && url.pathname.startsWith("/api/runs");
       const publicArtifactPause = request.method === "POST"
         && /^\/api\/runs\/run_[A-Za-z0-9_-]+\/pause$/.test(url.pathname)
         && Boolean(origin)
