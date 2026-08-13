@@ -226,8 +226,12 @@ function taskDetail(run) {
   const main = node("div"); main.append(node("h3", "", "完整任务要求"), node("p", "request-copy", run.request));
   const finding = run.latest_finding;
   if (finding) {
-    main.append(node("h3", "", `最新 Finding · v${finding.version}`));
-    main.lastChild.style.marginTop = "16px";
+    const heading = node("div", "finding-heading");
+    const download = node("a", "finding-download", `下载 ZIP · v${finding.version} ↓`);
+    download.href = `${state.apiUrl}/api/runs/${run.run_id}/findings/${finding.version}/download`;
+    download.addEventListener("click", (event) => { event.preventDefault(); downloadFinding(run, finding); });
+    heading.append(node("h3", "", `最新 Finding · v${finding.version}`), download);
+    main.append(heading);
     const loaded = state.findings.get(`${run.run_id}:${finding.version}`);
     main.append(node("div", "finding-copy", loaded?.markdown || (loaded?.error ? `暂时无法读取：${loaded.error}` : "正在读取 FINDING.md…")));
   }

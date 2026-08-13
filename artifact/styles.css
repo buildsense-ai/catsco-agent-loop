@@ -99,8 +99,11 @@ h1 { margin: 6px 0; font: 600 clamp(28px, 3vw, 38px)/1.15 var(--serif); }
 .detail { display: none; grid-template-columns: minmax(0,1.5fr) minmax(250px,.7fr); gap: 18px; padding: 17px 19px 20px; border-top: 1px solid var(--line); background: #fbfcfa; }
 .task.open .detail { display: grid; }
 .detail h3 { margin: 0 0 7px; color: var(--muted); font-size: 9px; letter-spacing: .09em; }
+.finding-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
+.finding-heading h3 { margin-bottom: 0; }
+.finding-download { flex: none; padding: 5px 8px; border: 1px solid color-mix(in srgb, var(--accent) 25%, white); border-radius: 7px; background: color-mix(in srgb, var(--accent) 6%, white); color: var(--accent); font-size: 9px; font-weight: 850; }
 .request-copy, .finding-copy { margin: 0; color: var(--text); font-size: 11px; line-height: 1.7; white-space: pre-wrap; }
-.finding-copy { max-height: 220px; overflow: auto; margin-top: 14px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: white; }
+.finding-copy { max-height: 220px; overflow: auto; margin-top: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: white; }
 .facts { margin: 0; }
 .facts div { display: grid; grid-template-columns: 72px minmax(0,1fr); gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 10px; }
 .facts dt { color: var(--muted); }
