@@ -47,6 +47,7 @@ loopctl cancel --run run_...
 - `POST /api/runs` accepts `request` and `repo`; if no base branch is supplied, Controller resolves the repository's actual default branch.
 - `Idempotency-Key` makes Run creation retry-safe. Reusing one key with different input is rejected.
 - Each run creates exactly one Monday Agent Task and one Developer Agent Task, then reuses their Topics.
+- Up to two Runs execute concurrently by default (configurable from 1 to a hard maximum of 4). Every Run has a unique ID, Monday Topic, Developer Topic, branch, worktree namespace, PR, receipts, and state directory.
 - Every logical send has a stable `client_msg_id`; retries cannot duplicate messages.
 - A new Episode run ID is expected after each continuation, while the Topic and Controller Run stay fixed.
 - A valid Finding ZIP is downloaded, SHA-256 hashed, path-checked, and required to contain `FINDING.md` and `manifest.json`.

@@ -9,11 +9,13 @@ function capsule(run: LoopRun, role: "Monday" | "Developer", missing: string): s
     `Iteration: ${run.iteration}`,
     `Repository: ${run.repo}`,
     `Branch: ${run.branch}`,
+    `Conversation namespace: ${run.run_id}:${role.toLowerCase()}`,
     run.pr ? `PR: ${run.pr.url}` : "PR: not created yet",
     run.pr ? `Current Head SHA: ${run.pr.head_sha}` : "Current Head SHA: unavailable",
     run.review_cycle ? `Review Cycle: ${run.review_cycle.cycle} (bound to Head ${run.review_cycle.head_sha})` : "Review Cycle: not started",
     `Current missing mechanical delivery: ${missing}`,
     "Controller state is authoritative; continue this same task in this same conversation.",
+    "Never reuse another Run's Topic, branch, worktree, files, PR, or delivery evidence.",
   ].join("\n");
 }
 
@@ -39,6 +41,7 @@ export function developerPrompt(run: LoopRun, kind: "initial" | "revision" | "ci
     "",
     "This is a direct CatsCompany Agent Task driven by catsco-agent-loop. Do not invoke the legacy loopctl-worker Skill and do not require execute_attempt, workspaceLease, targetTopicId, runtime_started, or candidate_submitted contracts.",
     "Use this prompt, the attached Finding ZIP, and the repository/branch details below as the complete work contract.",
+    `Before repository writes, create or reuse a dedicated worktree whose path includes ${run.run_id}; do not write from a worktree used by another Run.`,
     `Use branch ${run.branch} and target ${run.base_branch}. Implement, test, commit, push, and create or update the same PR in ${run.repo}.`,
     "Do not merge or close the PR. A text-only completion message is not delivery; Controller verifies the GitHub PR, Head SHA, and CI.",
   ].filter(Boolean).join("\n");

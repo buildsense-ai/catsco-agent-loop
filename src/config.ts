@@ -14,6 +14,10 @@ function positiveInt(value: unknown, fallback: number): number {
   return parsed > 0 ? parsed : fallback;
 }
 
+function boundedPositiveInt(value: unknown, fallback: number, maximum: number): number {
+  return Math.min(positiveInt(value, fallback), maximum);
+}
+
 function text(value: unknown, fallback = ""): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
@@ -51,7 +55,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControllerConf
     host: text(env.CATSLOOP_HOST ?? file.host, "127.0.0.1"),
     port: int(env.CATSLOOP_PORT ?? file.port, 19992),
     operatorToken: text(env.CATSLOOP_OPERATOR_TOKEN ?? file.operatorToken),
-    maxActiveRuns: int(env.CATSLOOP_MAX_ACTIVE_RUNS ?? file.maxActiveRuns, 1),
+    // One Controller may drive a small number of fully isolated Runs. Keep a
+    // hard ceiling so a configuration typo cannot fan out Agent Episodes.
+    maxActiveRuns: boundedPositiveInt(env.CATSLOOP_MAX_ACTIVE_RUNS ?? file.maxActiveRuns, 2, 4),
     catscoPollMs: int(env.CATSLOOP_CATSCO_POLL_MS ?? file.catscoPollMs, 5_000),
     githubPollMs: int(env.CATSLOOP_GITHUB_POLL_MS ?? file.githubPollMs, 15_000),
     idlePollMs: int(env.CATSLOOP_IDLE_POLL_MS ?? file.idlePollMs, 30_000),
