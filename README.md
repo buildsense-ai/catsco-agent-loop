@@ -41,6 +41,21 @@ loopctl resume --run run_...
 loopctl cancel --run run_...
 ```
 
+## Checking Run status
+
+Both checks below are read-only and require the operator token:
+
+```bash
+export CATSLOOP_OPERATOR_TOKEN=...
+loopctl status --run run_...
+curl -H "Authorization: Bearer $CATSLOOP_OPERATOR_TOKEN" \
+  "${CATSLOOP_API_URL:-http://127.0.0.1:19992}/api/runs/run_.../events?after=0"
+```
+
+`loopctl status` reads the current Run record. The events `GET` returns events with a sequence greater than `after`; advance that value to poll incrementally. Neither check creates, resumes, reconciles, or cancels a Run.
+
+An ordinary Monday ZIP does not automatically trigger a Run. Create a Run explicitly with `loopctl start` or `POST /api/runs`; a valid Finding ZIP is a delivery for an existing Run's Monday phase.
+
 ## Invariants
 
 - A run exists only after explicit `POST /api/runs` or `loopctl start`.
