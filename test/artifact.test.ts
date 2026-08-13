@@ -36,9 +36,15 @@ test("Artifact keeps a fixed latest Finding download beside the heading without 
     lastChild?: FakeArtifactElement;
     style: Record<string, string> = {};
     href = "";
+    target = "";
+    rel = "";
     download = "";
     type = "";
     value = "";
+    selected = false;
+    scrollTop = 0;
+    attributes: Record<string, string> = {};
+    listeners: Record<string, Array<() => void | Promise<void>>> = {};
     onclick?: () => void;
     onsubmit?: () => void;
 
@@ -47,7 +53,8 @@ test("Artifact keeps a fixed latest Finding download beside the heading without 
       this.childNodes.push(...children);
       this.lastChild = this.childNodes.at(-1);
     }
-    addEventListener() {}
+    addEventListener(type: string, listener: () => void | Promise<void>) { (this.listeners[type] ||= []).push(listener); }
+    setAttribute(name: string, value: string) { this.attributes[name] = value; }
     classList = { add() {}, remove() {}, toggle() {} };
   }
 
@@ -108,6 +115,80 @@ test("Artifact keeps a fixed latest Finding download beside the heading without 
   assert.ok(historicalDownload, "older Finding activity links should remain available");
   assert.equal(historicalDownload.textContent, "finding-v1.zip ↓");
   assert.match(historicalDownload.href, /\/api\/runs\/run_demo\/findings\/1\/download$/);
+
+  const markdown = [
+    "# Safe heading",
+    "",
+    "- first item",
+    "- **bold item** with `inline code`",
+    "",
+    "1. ordered item",
+    "",
+    "> quoted text",
+    "",
+    "```js",
+    "const answer = 42;",
+    "```",
+    "",
+    "[safe link](https://example.com/docs) and [relative link](./evidence.txt)",
+    "",
+    "<script>globalThis.pwned = true</script>",
+    "<img src=x onerror=globalThis.pwned=true>",
+    "[bad scheme](javascript:alert(1)) [encoded bad](jav&#x61;script:alert(1))",
+    "[hex overflow](&#x110000;) [decimal overflow](&#1114112;)",
+  ].join("\n");
+  Object.assign(context, { markdownFixture: markdown });
+  const rendered = vm.runInContext("renderFindingMarkdown(markdownFixture)", context) as FakeArtifactElement;
+  assert.equal(textOf(findByTag(rendered, "h1")), "Safe heading");
+  assert.ok(findByTag(rendered, "ul"), "unordered lists should use semantic DOM");
+  assert.ok(findByTag(rendered, "ol"), "ordered lists should use semantic DOM");
+  assert.equal(textOf(findByTag(rendered, "strong")), "bold item");
+  assert.ok(findAllByTag(rendered, "code").some((element) => element.textContent === "inline code"));
+  assert.equal(textOf(findByTag(rendered, "pre")), "const answer = 42;");
+  assert.equal(textOf(findByTag(rendered, "blockquote")), "quoted text");
+  assert.equal(findByTag(rendered, "script"), undefined, "raw HTML must never create script elements");
+  assert.equal(findByTag(rendered, "img"), undefined, "raw HTML must never create event-bearing elements");
+  const links = findAllByTag(rendered, "a") as Array<FakeArtifactElement>;
+  assert.deepEqual(links.map((link) => link.href), ["https://example.com/docs", "./evidence.txt"]);
+  assert.equal(links[0]?.target, "_blank");
+  assert.equal(links[0]?.rel, "noopener noreferrer");
+  assert.equal(links[1]?.target, "");
+
+  vm.runInContext('state.findings.set("run_demo:2", { markdown: "# Version 2" }); state.findings.set("run_demo:1", { markdown: "# Version 1" });', context);
+  const latestDetail = vm.runInContext("taskDetail(runFixture)", context) as FakeArtifactElement;
+  assert.equal(textOf(findByTag(findByClass(latestDetail, "finding-markdown")!, "h1")), "Version 2");
+  const selector = findByTag(latestDetail, "select") as FakeArtifactElement;
+  assert.deepEqual(selector.childNodes.map((option) => option.value), ["1", "2"]);
+  assert.equal(selector.childNodes[1]?.selected, true);
+
+  vm.runInContext('state.selectedFindings.set("run_demo", 1)', context);
+  const historicalDetail = vm.runInContext("taskDetail(runFixture)", context) as FakeArtifactElement;
+  assert.equal(findByClass(historicalDetail, "finding-heading")?.childNodes[0]?.textContent, "历史 Finding · v1");
+  assert.equal(textOf(findByTag(findByClass(historicalDetail, "finding-markdown")!, "h1")), "Version 1");
+  assert.equal(findByClass(historicalDetail, "finding-download")?.textContent, "下载 ZIP · v1 ↓");
+  assert.match((findByClass(historicalDetail, "finding-download") as FakeArtifactElement).href, /\/findings\/1\/download$/);
+
+  const requested: string[] = [];
+  Object.assign(context, {
+    runHistory: { run_id: "run_history", latest_finding: { version: 2 }, finding_history: [{ version: 1 }, { version: 2 }] },
+    fetch: async (input: URL) => {
+      requested.push(String(input));
+      return { ok: true, json: async () => ({ markdown: "# Historical response" }) };
+    },
+  });
+  vm.runInContext('state.selectedFindings.set("run_history", 1)', context);
+  await vm.runInContext("loadFinding(runHistory)", context);
+  assert.match(requested[0] || "", /\/api\/runs\/run_history\/findings\/1$/);
+  assert.equal(vm.runInContext('state.findings.get("run_history:1").markdown', context), "# Historical response");
+});
+
+test("Artifact styles keep rendered Findings scrollable and readable on narrow screens", async () => {
+  const styles = await readFile(new URL("../artifact/styles.css", import.meta.url), "utf8");
+  assert.match(styles, /\.finding-copy\s*\{[^}]*max-height:\s*220px;[^}]*overflow:\s*auto;/s);
+  assert.match(styles, /\.finding-markdown pre\s*\{[^}]*overflow-x:\s*auto;/s);
+  assert.match(styles, /\.finding-copy\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
+  assert.match(styles, /\.detail\s*>\s*\*\s*\{[^}]*min-width:\s*0;/s);
+  assert.match(styles, /@media \(max-width:\s*780px\)[\s\S]*\.finding-heading\s*\{[^}]*flex-direction:\s*column;/);
 });
 
 test("Artifact updates the current phase elapsed time every second", async () => {
@@ -209,7 +290,29 @@ function findByClass(root: FakeElement, className: string): FakeElement | undefi
   return undefined;
 }
 
+function findByTag(root: FakeElement, tagName: string): FakeElement | undefined {
+  if (root.tagName === tagName) return root;
+  for (const child of root.childNodes) {
+    const match = findByTag(child, tagName);
+    if (match) return match;
+  }
+  return undefined;
+}
+
+function findAllByTag(root: FakeElement, tagName: string): FakeElement[] {
+  return [
+    ...(root.tagName === tagName ? [root] : []),
+    ...root.childNodes.flatMap((child) => findAllByTag(child, tagName)),
+  ];
+}
+
+function textOf(root: FakeElement | undefined): string {
+  if (!root) return "";
+  return root.textContent + root.childNodes.map(textOf).join("");
+}
+
 interface FakeElement {
+  tagName?: string;
   className: string;
   textContent: string;
   dataset: Record<string, string>;
