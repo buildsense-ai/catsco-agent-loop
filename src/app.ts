@@ -145,6 +145,15 @@ export function createLoopApi(controller: LoopController, store: RunStore) {
       }
       throw new HttpError(405, "method not allowed");
     } catch (error) {
+      // A client can disconnect after a streamed ZIP response has already
+      // committed its headers. In that case pipeline() rejects, but emitting a
+      // second JSON response would throw ERR_HTTP_HEADERS_SENT and crash the
+      // whole Controller process. The request is already over for that client,
+      // so only make sure the socket is closed and keep serving other Runs.
+      if (response.headersSent || response.writableEnded || response.destroyed) {
+        if (!response.destroyed) response.destroy();
+        return;
+      }
       const status = error instanceof HttpError ? error.status : error instanceof LoopError && error.status ? error.status : (error as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 500;
       send(response, status, { error: error instanceof Error ? error.message : String(error) });
     }
