@@ -1,5 +1,8 @@
 const $ = (id) => document.getElementById(id);
-const defaultApiUrl = `${window.location.protocol}//${window.location.hostname}:19993`;
+const loopback = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost";
+const defaultApiUrl = loopback
+  ? `${window.location.protocol}//${window.location.hostname}:19992`
+  : `https://${window.location.hostname}:19993`;
 const state = {
   apiUrl: defaultApiUrl,
   token: sessionStorage.getItem("catsloop.operatorToken") || "",
