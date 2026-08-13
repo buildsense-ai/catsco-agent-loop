@@ -42,6 +42,7 @@ export function developerPrompt(run: LoopRun, kind: "initial" | "revision" | "ci
     "This is a direct CatsCompany Agent Task driven by catsco-agent-loop. Do not invoke the legacy loopctl-worker Skill and do not require execute_attempt, workspaceLease, targetTopicId, runtime_started, or candidate_submitted contracts.",
     "Use this prompt, the attached Finding ZIP, and the repository/branch details below as the complete work contract.",
     `Before repository writes, create or reuse a dedicated worktree whose path includes ${run.run_id}; do not write from a worktree used by another Run.`,
+    "Use the current environment's default authenticated gh identity; do not set, copy, or guess GH_CONFIG_DIR or GitHub credentials.",
     `Use branch ${run.branch} and target ${run.base_branch}. Implement, test, commit, push, and create or update the same PR in ${run.repo}.`,
     "Do not merge or close the PR. A text-only completion message is not delivery; Controller verifies the GitHub PR, Head SHA, and CI.",
   ].filter(Boolean).join("\n");
