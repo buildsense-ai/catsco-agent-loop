@@ -87,6 +87,7 @@ test("normal ZIP to PR to CI to current-SHA approval completes without merge", a
   assert.equal(run.review_cycle?.status, "active");
   assert.equal(run.monday.topic_id, mondayTopic, "Monday Topic must be reused");
   run.last_progress_at = new Date(Date.now() - 1_000).toISOString();
+  run.last_error = "historical transient failure";
   await ctx.store.writeRun(run);
   const progressBeforeApproval = run.last_progress_at;
   ctx.github.evidence.push({ id: "review:1", kind: "review", author: "monday-reviewer", state: "APPROVED", commit_id: "abc123", created_at: new Date().toISOString() });
@@ -97,6 +98,7 @@ test("normal ZIP to PR to CI to current-SHA approval completes without merge", a
   assert.match(run.terminal_reason!, /Approved/);
   assert.equal(run.review_cycle?.status, "approved");
   assert.equal(run.review_cycle?.evidence?.id, "review:1");
+  assert.equal(run.last_error, undefined, "successful completion must not display a stale historical error");
   assert.ok(Date.parse(run.last_progress_at) > Date.parse(progressBeforeApproval));
 });
 
