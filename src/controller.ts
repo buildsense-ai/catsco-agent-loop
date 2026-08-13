@@ -975,6 +975,7 @@ export class LoopController {
     run.phase = phase;
     run.active_actor = actor;
     run.waiting_for = waitingFor;
+    if (phase === "completed") run.last_error = undefined;
     run.updated_at = changedAt;
     run.activity_state = computeActivityState(run, Date.parse(run.updated_at), this.config.activityStallMs);
     await this.store.writeRun(run);
