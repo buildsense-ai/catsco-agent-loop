@@ -641,6 +641,42 @@ test("a softly paused Run does not consume the active execution slot", async () 
   assert.equal((await ctx.store.readRun(second.run_id)).phase, "monday_finding");
 });
 
+test("two active slots keep parallel Runs isolated through Monday and Developer handoff", async () => {
+  const ctx = await setup();
+  ctx.config.maxActiveRuns = 2;
+  const first = await ctx.controller.createRun({ request: "first parallel task", repo: "acme/widget" });
+  const second = await ctx.controller.createRun({ request: "second parallel task", repo: "acme/widget" });
+
+  await ctx.controller.tick();
+  let firstRun = await ctx.store.readRun(first.run_id);
+  let secondRun = await ctx.store.readRun(second.run_id);
+  assert.equal(firstRun.phase, "monday_finding");
+  assert.equal(secondRun.phase, "monday_finding");
+  assert.notEqual(firstRun.monday.topic_id, secondRun.monday.topic_id);
+  assert.match(ctx.catsco.topics.get(firstRun.monday.topic_id!)?.messages.at(-1)?.content ?? "", new RegExp(first.run_id));
+  assert.match(ctx.catsco.topics.get(secondRun.monday.topic_id!)?.messages.at(-1)?.content ?? "", new RegExp(second.run_id));
+
+  ctx.catsco.addFinding(firstRun.monday.topic_id!, "first-finding.zip");
+  ctx.catsco.addFinding(secondRun.monday.topic_id!, "second-finding.zip");
+  ctx.catsco.finish(firstRun.monday.topic_id!);
+  ctx.catsco.finish(secondRun.monday.topic_id!);
+  await ctx.controller.tick();
+
+  firstRun = await ctx.store.readRun(first.run_id);
+  secondRun = await ctx.store.readRun(second.run_id);
+  assert.equal(firstRun.phase, "developer_implementing");
+  assert.equal(secondRun.phase, "developer_implementing");
+  assert.notEqual(firstRun.developer.topic_id, secondRun.developer.topic_id);
+  assert.notEqual(firstRun.branch, secondRun.branch);
+  for (const run of [firstRun, secondRun]) {
+    const input = ctx.catsco.sentInputs.find((item) => item.topicId === run.developer.topic_id);
+    assert.equal(input?.clientMsgId.startsWith(`${run.run_id}:`), true);
+    assert.match(input?.text ?? "", new RegExp(`worktree whose path includes ${run.run_id}`));
+    assert.match(input?.text ?? "", new RegExp(`Conversation namespace: ${run.run_id}:developer`));
+    assert.equal(input?.files?.length, 1);
+  }
+});
+
 test("createRun is idempotent and resolves the repository default branch", async () => {
   const ctx = await setup();
   ctx.github.defaultBranch = "develop";

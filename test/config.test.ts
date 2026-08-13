@@ -18,6 +18,13 @@ test("loadConfig exposes 90 minute mechanical, 20 minute activity, and 4 hour ab
   assert.equal(config.stageTimeoutMs, 90 * 60_000);
   assert.equal(config.activityStallMs, 20 * 60_000);
   assert.equal(config.runAbsoluteTimeoutMs, 4 * 60 * 60_000);
+  assert.equal(config.maxActiveRuns, 2);
+});
+
+test("loadConfig bounds parallel Run slots to a small safe range", () => {
+  assert.equal(loadConfig(baseEnv({ CATSLOOP_MAX_ACTIVE_RUNS: "3" })).maxActiveRuns, 3);
+  assert.equal(loadConfig(baseEnv({ CATSLOOP_MAX_ACTIVE_RUNS: "99" })).maxActiveRuns, 4);
+  assert.equal(loadConfig(baseEnv({ CATSLOOP_MAX_ACTIVE_RUNS: "0" })).maxActiveRuns, 2);
 });
 
 test("loadConfig accepts positive timing overrides and rejects non-positive values", () => {
